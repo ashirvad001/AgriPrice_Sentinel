@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Date, DateTime, Text, JSON, UniqueConstraint
+from sqlalchemy import String, Date, DateTime, Text, JSON, Float, Boolean, UniqueConstraint
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,6 +51,28 @@ class WeatherObservation(Base):
     # Maintain uniqueness
     __table_args__ = (
         UniqueConstraint('district', 'date', name='uq_weather_district_date'),
+    )
+
+class ModelDiagnostic(Base):
+    __tablename__ = "model_diagnostics"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    crop: Mapped[str] = mapped_column(String(100), index=True)
+    mandi: Mapped[str] = mapped_column(String(200), index=True)
+    test_name: Mapped[str] = mapped_column(String(50))  # e.g. "ADF"
+    stage: Mapped[str] = mapped_column(String(30))       # "original" or "differenced"
+    adf_statistic: Mapped[float] = mapped_column(Float)
+    p_value: Mapped[float] = mapped_column(Float)
+    critical_1pct: Mapped[float] = mapped_column(Float, nullable=True)
+    critical_5pct: Mapped[float] = mapped_column(Float, nullable=True)
+    critical_10pct: Mapped[float] = mapped_column(Float, nullable=True)
+    is_stationary: Mapped[bool] = mapped_column(Boolean)
+    differencing_applied: Mapped[bool] = mapped_column(Boolean)
+    tested_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('crop', 'mandi', 'test_name', 'stage',
+                         name='uq_diag_crop_mandi_test_stage'),
     )
 
 async def init_db():
