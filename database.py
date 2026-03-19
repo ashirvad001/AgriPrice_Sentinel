@@ -75,6 +75,20 @@ class ModelDiagnostic(Base):
                          name='uq_diag_crop_mandi_test_stage'),
     )
 
+class ModelConfig(Base):
+    __tablename__ = "model_configs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    crop: Mapped[str] = mapped_column(String(100), index=True)
+    lstm_units: Mapped[int] = mapped_column(nullable=False)
+    dropout: Mapped[float] = mapped_column(Float, nullable=False)
+    learning_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    sequence_length: Mapped[int] = mapped_column(nullable=False)
+    batch_size: Mapped[int] = mapped_column(nullable=False)
+    rmse: Mapped[float] = mapped_column(Float, nullable=False)
+    optimized_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
