@@ -8,6 +8,7 @@ to Integrated Gradients / DeepExplainer) to compute per-feature importance.
 Generates farmer-friendly visualisations and persists SHAP values to PostgreSQL.
 """
 
+from __future__ import annotations
 import os
 import asyncio
 import numpy as np
@@ -369,7 +370,7 @@ class CropShapExplainer:
     # ── (3) Save to PostgreSQL ───────────────────────────────────────────────
     async def save_to_db(self, crop: str, shap_values: np.ndarray,
                          feature_values: np.ndarray,
-                         prediction_date: date = None):
+                         prediction_date: date | None = None):
         """
         Persist SHAP explanations for a crop to PostgreSQL.
         Stores all features ranked by importance for frontend display.

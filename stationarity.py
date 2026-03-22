@@ -18,7 +18,7 @@ Usage
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Tuple
 
 import numpy as np
@@ -189,5 +189,5 @@ def _build_row(
         critical_10pct=result["critical_10pct"],
         is_stationary=result["p_value"] <= _SIGNIFICANCE,
         differencing_applied=differencing_applied,
-        tested_at=datetime.utcnow(),
+        tested_at=datetime.now(timezone.utc),
     )

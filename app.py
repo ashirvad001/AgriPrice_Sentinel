@@ -25,6 +25,7 @@ from api.auth import router as auth_router
 from api.routes_forecast import router as forecast_router
 from api.routes_prices import router as prices_router
 from api.routes_alerts import router as alerts_router
+from api.routes_whatsapp import router as whatsapp_router
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -100,6 +101,7 @@ app.include_router(auth_router)
 app.include_router(forecast_router)
 app.include_router(prices_router)
 app.include_router(alerts_router)
+app.include_router(whatsapp_router)
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

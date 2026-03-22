@@ -1,0 +1,10 @@
+{
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Windows",
+  "venvPath": "c:/Users/singh/Desktop/Project/Main 2/AgriPrice_Sentinel",
+  "venv": "venv",
+  "extraPaths": [
+    ".",
+    "c:/Users/singh/Desktop/Project/Main 2/AgriPrice_Sentinel"
+  ]
+}

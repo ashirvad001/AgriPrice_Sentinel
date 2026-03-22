@@ -121,7 +121,9 @@ class AlertSubscription(Base):
     __tablename__ = "alert_subscriptions"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, nullable=True)  # Optional for WhatsApp-direct
+    phone_number: Mapped[str] = mapped_column(String(20), index=True, nullable=True)
+    language: Mapped[str] = mapped_column(String(20), default="English")
     crop: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     mandi: Mapped[str] = mapped_column(String(200), nullable=False)
     threshold_price: Mapped[float] = mapped_column(Float, nullable=False)

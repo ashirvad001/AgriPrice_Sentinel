@@ -1,3 +1,4 @@
+from __future__ import annotations
 import asyncio
 import aiohttp
 from datetime import datetime, timedelta, date
@@ -28,7 +29,7 @@ IMD_API_URL = "https://imd.gov.in/api/v1/weather/district"
     stop=stop_after_attempt(5),
     retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
 )
-async def fetch_weather_api(session: aiohttp.ClientSession, district: str) -> dict:
+async def fetch_weather_api(session: aiohttp.ClientSession, district: str) -> dict:  # type: ignore[return]
     params = {
         "district": district,
         "date": datetime.today().strftime("%Y-%m-%d")

@@ -18,6 +18,7 @@ import time
 import json
 import traceback
 import logging
+from typing import Any
 from datetime import datetime, timedelta, date
 
 import numpy as np
@@ -265,7 +266,7 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
     logger.info(f"RETRAINING: {crop}")
     logger.info(f"{'='*50}")
 
-    log_data = {
+    log_data: dict[str, Any] = {
         "crop": crop,
         "started_at": start_time,
         "finished_at": None,
@@ -353,7 +354,7 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
         # ── 7. Evaluate ──────────────────────────────────────────────────
         eval_result = model.evaluate(X_test, y_test, verbose=0)
         new_rmse = eval_result[1] if len(eval_result) > 1 else eval_result[0]
-        log_data["rmse_after"] = float(new_rmse)
+        log_data["rmse_after"] = float(new_rmse)  # type: ignore[arg-type]
         logger.info(f"  New RMSE: {new_rmse:.4f}")
 
         # ── 8. Champion-Challenger ───────────────────────────────────────
@@ -362,7 +363,7 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
 
         if deployed_rmse is not None:
             improvement = (deployed_rmse - new_rmse) / deployed_rmse
-            log_data["improvement_pct"] = round(improvement * 100, 2)
+            log_data["improvement_pct"] = round(float(improvement * 100), 2)
             logger.info(f"  Deployed RMSE: {deployed_rmse:.4f}, Improvement: {improvement*100:.1f}%")
 
             if improvement > PROMOTION_THRESHOLD:
@@ -395,7 +396,7 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
     finally:
         elapsed = time.time() - t0
         log_data["finished_at"] = datetime.utcnow()
-        log_data["duration_seconds"] = round(elapsed, 1)
+        log_data["duration_seconds"] = round(float(elapsed), 1)
         logger.info(f"  Duration: {elapsed:.1f}s")
 
     return log_data
@@ -459,7 +460,7 @@ def retrain_all_models(self):
             session.close()
 
     # ── Summary ──────────────────────────────────────────────────────────
-    elapsed_total = round(time.time() - overall_start, 1)
+    elapsed_total = round(float(time.time() - overall_start), 1)
     summary = (
         f"🌾 *Weekly LSTM Retraining Complete*\n"
         f"⏱ Duration: {elapsed_total}s\n"

@@ -38,8 +38,11 @@ def _make_sample_df(n: int = 180, seed: int = 42) -> pd.DataFrame:
 class TestEngineerFeatures:
     """Core contract tests for engineer_features()."""
 
+    df: pd.DataFrame
+    result: pd.DataFrame
+
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self) -> None:
         self.df = _make_sample_df(180)
         self.result = engineer_features(self.df)
 
@@ -101,7 +104,7 @@ class TestEngineerFeatures:
     def test_rabi_kharif_mutually_exclusive_or_neither(self):
         """A row should never be both rabi AND kharif at the same time."""
         both = (self.result["is_rabi"] == 1) & (self.result["is_kharif"] == 1)
-        assert not both.any(), "Some rows are flagged as both rabi and kharif"
+        assert not bool(both.any()), "Some rows are flagged as both rabi and kharif"
 
     def test_is_rabi_flag(self):
         """is_rabi must be 1 for months 10-12 and 1-3 (Oct–Mar)."""

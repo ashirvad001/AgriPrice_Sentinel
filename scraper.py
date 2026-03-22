@@ -1,3 +1,4 @@
+from __future__ import annotations
 import asyncio
 import aiohttp
 from datetime import datetime
@@ -29,7 +30,7 @@ ENAM_API_URL = "https://enam.gov.in/api/v1/prices"
     stop=stop_after_attempt(5),
     retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
 )
-async def fetch_api_data(session: aiohttp.ClientSession, crop: str, state: str) -> dict:
+async def fetch_api_data(session: aiohttp.ClientSession, crop: str, state: str) -> dict:  # type: ignore[return]
     """Fetch data with exponential backoff for a specific state and crop."""
     # Assuming params are sent as query params. Change as per actual API specs.
     params = {

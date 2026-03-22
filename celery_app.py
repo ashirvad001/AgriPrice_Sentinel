@@ -25,7 +25,7 @@ app = Celery(
     "agriprice_sentinel",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks.retrain"],
+    include=["tasks.retrain", "tasks.alerts"],
 )
 
 # ── Celery configuration ────────────────────────────────────────────────────
@@ -46,7 +46,11 @@ app.conf.update(
 app.conf.beat_schedule = {
     "weekly-lstm-retrain": {
         "task": "tasks.retrain.retrain_all_models",
-        "schedule": crontab(hour=2, minute=0, day_of_week="sunday"),
         "options": {"queue": "retrain"},
+    },
+    "daily-price-alerts": {
+        "task": "tasks.alerts.send_daily_alerts",
+        "schedule": crontab(hour=6, minute=0),
+        "options": {"queue": "alerts"},
     },
 }
