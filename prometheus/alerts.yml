@@ -1,0 +1,12 @@
+groups:
+  - name: model_performance
+    rules:
+      - alert: RmseDegradation
+        # Alerts if current RMSE > 10% of 7-day rolling average
+        expr: model_rmse > 1.1 * avg_over_time(model_rmse[7d])
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "RMSE Degradation Detected"
+          description: "Model RMSE has degraded by more than 10% compared to the 7-day rolling average. Target retrain."

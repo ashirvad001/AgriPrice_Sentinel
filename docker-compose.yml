@@ -1,0 +1,173 @@
+version: '3.8'
+
+x-api-base: &api-base
+  build:
+    context: .
+  env_file:
+    - .env
+  networks:
+    - msp_net
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+
+services:
+  # 1. Postgres Service
+  postgres:
+    image: postgres:16
+    container_name: msp_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-msp_forecast}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-msp_forecast}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - msp_net
+
+  # 2. Redis Service
+  redis:
+    image: redis:7-alpine
+    container_name: msp_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - msp_net
+
+  # 3. API Service - FastAPI with 4 Uvicorn workers
+  api:
+    <<: *api-base
+    container_name: msp_api
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+
+  # 4. Celery Worker Service
+  celery_worker:
+    <<: *api-base
+    container_name: msp_celery_worker
+    command: celery -A app.tasks worker --concurrency=2
+    restart: unless-stopped
+
+  # 5. Celery Beat Service
+  celery_beat:
+    <<: *api-base
+    container_name: msp_celery_beat
+    command: celery -A app.tasks beat
+    restart: unless-stopped
+
+  # 6. Frontend Service - Next.js
+  frontend:
+    build:
+      context: ./dashboard
+    container_name: msp_frontend
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    networks:
+      - msp_net
+    depends_on:
+      - api
+
+  # 7. Nginx Service - Reverse Proxy, SSL, Rate Limiting, GZIP
+  nginx:
+    image: nginx:alpine
+    container_name: msp_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Assume nginx configurations are placed in a local 'nginx' directory
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    networks:
+      - msp_net
+    depends_on:
+      - api
+      - frontend
+
+  # Let's Encrypt Certbot - enabled only on 'prod' profile
+  certbot:
+    image: certbot/certbot
+    container_name: msp_certbot
+    profiles:
+      - prod
+    restart: unless-stopped
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - msp_net
+
+  # 8. Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: msp_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9090:9090"
+    networks:
+      - msp_net
+
+  # 9. Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: msp_grafana
+    restart: unless-stopped
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3001:3000"  # Grafana UI
+    networks:
+      - msp_net
+    depends_on:
+      - prometheus
+
+  # 10. Alertmanager
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: msp_alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager:/etc/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+    ports:
+      - "9093:9093"
+    networks:
+      - msp_net
+
+networks:
+  msp_net:
+    name: msp_net
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
