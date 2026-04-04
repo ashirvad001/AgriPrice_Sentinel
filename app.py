@@ -26,6 +26,7 @@ from api.routes_forecast import router as forecast_router
 from api.routes_prices import router as prices_router
 from api.routes_alerts import router as alerts_router
 from api.routes_whatsapp import router as whatsapp_router
+from api.routes_shap import router as shap_router
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -74,9 +75,10 @@ app = FastAPI(
 
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,12 +98,16 @@ except ImportError:
     print("⚠  prometheus-fastapi-instrumentator not installed — /metrics disabled")
 
 
+from api.routes_ws import router as ws_router
+
 # ── Register routers ────────────────────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(forecast_router)
 app.include_router(prices_router)
 app.include_router(alerts_router)
 app.include_router(whatsapp_router)
+app.include_router(shap_router)
+app.include_router(ws_router)
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

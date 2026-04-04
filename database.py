@@ -137,6 +137,7 @@ class RetrainingLog(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     crop: Mapped[str] = mapped_column(String(100), index=True)
+    mandi: Mapped[str] = mapped_column(String(200), index=True, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     duration_seconds: Mapped[float] = mapped_column(Float, nullable=True)

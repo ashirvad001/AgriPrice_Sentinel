@@ -1,9 +1,9 @@
 """
 tasks/retrain.py
 ────────────────
-Celery task that retrains all 16 LSTM crop models every Sunday at 2 AM.
+Celery task that retrains LSTM crop models every Sunday at 2 AM.
 
-Pipeline per crop:
+Pipeline per crop/mandi:
     1. Load 3 years of raw price data from PostgreSQL
     2. Run feature engineering (48 features)
     3. Build model with best hyperparameters from model_configs
@@ -26,6 +26,7 @@ import pandas as pd
 import tensorflow as tf
 import keras_tuner as kt
 from sklearn.preprocessing import MinMaxScaler
+import joblib
 
 from celery_app import app as celery_app
 from feature_engineering import engineer_features
@@ -57,6 +58,9 @@ TARGET_CROPS = [
     "Wheat", "Rice", "Maize", "Bajra", "Jowar", "Ragi", "Barley", "Gram",
     "Tur", "Moong", "Urad", "Groundnut", "Soybean", "Mustard", "Cotton", "Sugarcane",
 ]
+MANDIS = ["Lucknow Mandi", "Indore Mandi", "Amritsar Mandi"]
+
+TARGET_CROP_MANDIS = [(crop, mandi) for crop in TARGET_CROPS for mandi in MANDIS]
 
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "saved_models")
 PROMOTION_THRESHOLD = 0.02  # 2% improvement required
@@ -70,7 +74,7 @@ OUTPUT_STEPS = 30
 #  HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _load_crop_data(session: Session, crop: str, years: int = 3) -> pd.DataFrame:
+def _load_crop_data(session: Session, crop: str, mandi: str, years: int = 3) -> pd.DataFrame:
     """
     Load raw price data from PostgreSQL for the past `years` years.
     Reconstructs a DataFrame from the raw_data JSON column.
@@ -79,13 +83,15 @@ def _load_crop_data(session: Session, crop: str, years: int = 3) -> pd.DataFrame
     query = text("""
         SELECT fetch_date, raw_data
         FROM raw_prices
-        WHERE LOWER(crop) = LOWER(:crop) AND fetch_date >= :cutoff
+        WHERE LOWER(crop) = LOWER(:crop)
+          AND raw_data->>'market_name' ILIKE :mandi
+          AND fetch_date >= :cutoff
         ORDER BY fetch_date ASC
     """)
-    rows = session.execute(query, {"crop": crop, "cutoff": cutoff}).fetchall()
+    rows = session.execute(query, {"crop": crop, "mandi": mandi, "cutoff": cutoff}).fetchall()
 
     if not rows:
-        logger.warning(f"No data found for {crop} — generating synthetic data for demo")
+        logger.warning(f"No data found for {crop} at {mandi} — generating synthetic data for demo")
         return _generate_synthetic_data(crop)
 
     records = []
@@ -108,7 +114,7 @@ def _load_crop_data(session: Session, crop: str, years: int = 3) -> pd.DataFrame
         records.append(record)
 
     df = pd.DataFrame(records)
-    logger.info(f"Loaded {len(df)} records for {crop} (from {cutoff})")
+    logger.info(f"Loaded {len(df)} records for {crop} at {mandi} (from {cutoff})")
     return df
 
 
@@ -162,25 +168,28 @@ def _create_sequences(data: np.ndarray, targets: np.ndarray, seq_len: int):
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
 
-def _get_deployed_rmse(crop: str) -> float | None:
+def _get_deployed_rmse(crop: str, mandi: str) -> float | None:
     """Load the deployed model and return its RMSE, or None if no model exists."""
-    model_path = os.path.join(MODELS_DIR, f"{crop.lower()}_model.keras")
-    rmse_path = os.path.join(MODELS_DIR, f"{crop.lower()}_rmse.txt")
+    rmse_path = os.path.join(MODELS_DIR, f"{crop.lower()}_{mandi.lower().replace(' ', '_')}_rmse.txt")
     if os.path.exists(rmse_path):
         with open(rmse_path, "r") as f:
             return float(f.read().strip())
     return None
 
 
-def _save_model(model, crop: str, rmse: float):
-    """Save a trained model and its RMSE to disk."""
+def _save_model(model, scaler, crop: str, mandi: str, rmse: float):
+    """Save a trained model, its scaler, and its RMSE to disk."""
     os.makedirs(MODELS_DIR, exist_ok=True)
-    model_path = os.path.join(MODELS_DIR, f"{crop.lower()}_model.keras")
-    rmse_path = os.path.join(MODELS_DIR, f"{crop.lower()}_rmse.txt")
+    base_name = f"{crop.lower()}_{mandi.lower().replace(' ', '_')}"
+    model_path = os.path.join(MODELS_DIR, f"{base_name}_model.keras")
+    scaler_path = os.path.join(MODELS_DIR, f"{base_name}_scaler.pkl")
+    rmse_path = os.path.join(MODELS_DIR, f"{base_name}_rmse.txt")
+    
     model.save(model_path)
+    joblib.dump(scaler, scaler_path)
     with open(rmse_path, "w") as f:
         f.write(str(rmse))
-    logger.info(f"Model saved → {model_path} (RMSE: {rmse:.4f})")
+    logger.info(f"Model and scaler saved → {model_path} (RMSE: {rmse:.4f})")
 
 
 def _compute_feature_importance_delta(old_path: str, new_model, X_sample: np.ndarray) -> dict:
@@ -215,11 +224,11 @@ def _log_retraining(session: Session, log_data: dict):
     """Insert a retraining log record into PostgreSQL."""
     query = text("""
         INSERT INTO retraining_logs
-            (crop, started_at, finished_at, duration_seconds,
+            (crop, mandi, started_at, finished_at, duration_seconds,
              rmse_before, rmse_after, improvement_pct,
              model_promoted, feature_importance_delta, status, error_message)
         VALUES
-            (:crop, :started_at, :finished_at, :duration_seconds,
+            (:crop, :mandi, :started_at, :finished_at, :duration_seconds,
              :rmse_before, :rmse_after, :improvement_pct,
              :model_promoted, :feature_importance_delta, :status, :error_message)
     """)
@@ -251,23 +260,24 @@ def _send_slack_notification(message: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CORE RETRAINING FUNCTION (per crop)
+#  CORE RETRAINING FUNCTION (per crop and mandi)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def retrain_single_crop(crop: str, session: Session) -> dict:
+def retrain_single_crop(crop: str, mandi: str, session: Session) -> dict:
     """
-    Full retraining pipeline for a single crop.
+    Full retraining pipeline for a single crop and mandi.
 
     Returns a dict with retraining metadata.
     """
     start_time = datetime.utcnow()
     t0 = time.time()
     logger.info(f"{'='*50}")
-    logger.info(f"RETRAINING: {crop}")
+    logger.info(f"RETRAINING: {crop} at {mandi}")
     logger.info(f"{'='*50}")
 
     log_data: dict[str, Any] = {
         "crop": crop,
+        "mandi": mandi,
         "started_at": start_time,
         "finished_at": None,
         "duration_seconds": None,
@@ -282,7 +292,7 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
 
     try:
         # ── 1. Load data ─────────────────────────────────────────────────
-        df = _load_crop_data(session, crop, years=LOOKBACK_YEARS)
+        df = _load_crop_data(session, crop, mandi, years=LOOKBACK_YEARS)
         logger.info(f"  Data loaded: {len(df)} rows")
 
         # ── 2. Feature engineering ───────────────────────────────────────
@@ -358,7 +368,7 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
         logger.info(f"  New RMSE: {new_rmse:.4f}")
 
         # ── 8. Champion-Challenger ───────────────────────────────────────
-        deployed_rmse = _get_deployed_rmse(crop)
+        deployed_rmse = _get_deployed_rmse(crop, mandi)
         log_data["rmse_before"] = deployed_rmse
 
         if deployed_rmse is not None:
@@ -368,11 +378,11 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
 
             if improvement > PROMOTION_THRESHOLD:
                 # ── Compute feature importance delta before overwriting ───
-                old_path = os.path.join(MODELS_DIR, f"{crop.lower()}_model.keras")
+                old_path = os.path.join(MODELS_DIR, f"{crop.lower()}_{mandi.lower().replace(' ', '_')}_model.keras")
                 fi_delta = _compute_feature_importance_delta(old_path, model, X_test)
                 log_data["feature_importance_delta"] = fi_delta
 
-                _save_model(model, crop, new_rmse)
+                _save_model(model, scaler, crop, mandi, new_rmse)
                 log_data["model_promoted"] = True
                 logger.info(f"  ✅ MODEL PROMOTED (>{PROMOTION_THRESHOLD*100}% improvement)")
             else:
@@ -381,7 +391,7 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
             # No existing model → always save
             fi_delta = _compute_feature_importance_delta("", model, X_test)
             log_data["feature_importance_delta"] = fi_delta
-            _save_model(model, crop, new_rmse)
+            _save_model(model, scaler, crop, mandi, new_rmse)
             log_data["model_promoted"] = True
             log_data["improvement_pct"] = 100.0
             logger.info("  ✅ First model saved (no prior deployment)")
@@ -403,13 +413,13 @@ def retrain_single_crop(crop: str, session: Session) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CELERY TASK — RETRAIN ALL 16 MODELS
+#  CELERY TASK — RETRAIN ALL MODELS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @celery_app.task(name="tasks.retrain.retrain_all_models", bind=True, max_retries=1)
 def retrain_all_models(self):
     """
-    Celery task: retrain all 16 crop LSTM models.
+    Celery task: retrain all LSTM crop+mandi models.
 
     Scheduled via celery-beat for every Sunday at 2:00 AM IST.
     Can also be triggered manually:
@@ -418,7 +428,7 @@ def retrain_all_models(self):
     """
     overall_start = time.time()
     logger.info("=" * 60)
-    logger.info("  WEEKLY LSTM RETRAINING — ALL 16 CROPS")
+    logger.info(f"  WEEKLY LSTM RETRAINING — {len(TARGET_CROP_MANDIS)} Crop-Mandi Combinations")
     logger.info(f"  Started at: {datetime.utcnow().isoformat()}")
     logger.info("=" * 60)
 
@@ -432,28 +442,29 @@ def retrain_all_models(self):
         session = SyncSession()
 
     try:
-        for crop in TARGET_CROPS:
+        for crop, mandi in TARGET_CROP_MANDIS:
+            name = f"{crop} at {mandi}"
             try:
-                log_data = retrain_single_crop(crop, session)
+                log_data = retrain_single_crop(crop, mandi, session)
 
                 # Log to PostgreSQL
                 if session:
                     try:
                         _log_retraining(session, log_data)
                     except Exception as db_err:
-                        logger.warning(f"DB log failed for {crop}: {db_err}")
+                        logger.warning(f"DB log failed for {name}: {db_err}")
 
                 # Categorize result
                 if log_data["status"] == "failed":
-                    results["failed"].append(crop)
+                    results["failed"].append(name)
                 elif log_data.get("model_promoted"):
-                    results["promoted"].append(crop)
+                    results["promoted"].append(name)
                 else:
-                    results["skipped"].append(crop)
+                    results["skipped"].append(name)
 
             except Exception as e:
-                logger.error(f"Unexpected error for {crop}: {e}")
-                results["failed"].append(crop)
+                logger.error(f"Unexpected error for {name}: {e}")
+                results["failed"].append(name)
 
     finally:
         if session:
