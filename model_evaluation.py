@@ -73,13 +73,15 @@ MANDIS = ["Lucknow Mandi", "Indore Mandi", "Amritsar Mandi"]
 # 3 forecast horizons
 HORIZONS = [30, 60, 90]
 
-# 5 models
+# 5 models + 1 challenger (TFT)
+# Note: TFT requires GPU for full 720 runs; add --models TFT flag for selective testing
 MODEL_NAMES = [
     "ARIMA(5,1,2)",
     "SARIMA",
     "Prophet",
     "Vanilla LSTM",
     "BiLSTM+Attention",
+    "TFT",
 ]
 
 
@@ -464,6 +466,98 @@ def run_bilstm_attention(
     return {"predicted": predictions, "lower": lower, "upper": upper}
 
 
+def run_tft(train_raw: np.ndarray, test_raw: np.ndarray, horizon: int, dates: pd.DatetimeIndex) -> dict:
+    """Temporal Fusion Transformer via pytorch-forecasting."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    
+    import torch
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import EarlyStopping
+    from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
+    from pytorch_forecasting.metrics import QuantileLoss
+    
+    n_predict = min(horizon, len(test_raw))
+    
+    df_train = pd.DataFrame({
+        "time_idx": np.arange(len(train_raw)),
+        "modal_price": train_raw,
+        "group": "single"
+    })
+    
+    max_encoder_length = 60
+    max_prediction_length = horizon
+    
+    # Must have enough samples
+    if len(train_raw) < max_encoder_length + max_prediction_length:
+        raise ValueError("Not enough data for TFT")
+        
+    training = TimeSeriesDataSet(
+        df_train,
+        time_idx="time_idx",
+        target="modal_price",
+        group_ids=["group"],
+        min_encoder_length=max_encoder_length,
+        max_encoder_length=max_encoder_length,
+        min_prediction_length=max_prediction_length,
+        max_prediction_length=max_prediction_length,
+        time_varying_unknown_reals=["modal_price"],
+        time_varying_known_reals=[],
+    )
+    
+    train_dataloader = training.to_dataloader(train=True, batch_size=32, num_workers=0)
+    val_dataloader = training.to_dataloader(train=False, batch_size=32, num_workers=0)
+    
+    tft = TemporalFusionTransformer.from_dataset(
+        training,
+        learning_rate=0.03,
+        hidden_size=32,
+        attention_head_size=2,
+        dropout=0.1,
+        hidden_continuous_size=16,
+        loss=QuantileLoss([0.1, 0.5, 0.9]),
+    )
+    
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min"
+    )
+    
+    trainer = pl.Trainer(
+        max_epochs=30,
+        accelerator="auto",
+        callbacks=[early_stop_callback],
+        logger=False,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        enable_progress_bar=False,
+    )
+    
+    trainer.fit(tft, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+    
+    encoder_data = df_train.iloc[-max_encoder_length:].copy()
+    decoder_data = pd.DataFrame({
+        "time_idx": np.arange(len(train_raw), len(train_raw) + max_prediction_length),
+        "modal_price": encoder_data["modal_price"].iloc[-1],
+        "group": "single"
+    })
+    
+    predict_df = pd.concat([encoder_data, decoder_data], ignore_index=True)
+    predict_dataloader = TimeSeriesDataSet.from_dataset(training, predict_df, predict=True, stop_randomization=True).to_dataloader(train=False, batch_size=1, num_workers=0)
+    
+    preds = trainer.predict(tft, dataloaders=predict_dataloader)
+    quantiles = preds[0][0]
+    
+    pred_p50 = quantiles[:, 1].numpy()[:n_predict]
+    pred_p10 = quantiles[:, 0].numpy()[:n_predict]
+    pred_p90 = quantiles[:, 2].numpy()[:n_predict]
+    
+    return {
+        "predicted": pred_p50,
+        "lower": pred_p10,
+        "upper": pred_p90
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Experiment Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -490,6 +584,8 @@ def run_experiment(
             result = run_vanilla_lstm(train_scaled, test_raw, horizon, scaler)
         elif model_name == "BiLSTM+Attention":
             result = run_bilstm_attention(train_scaled, test_raw, horizon, scaler)
+        elif model_name == "TFT":
+            result = run_tft(train_raw, test_raw, horizon, df["date"])
         else:
             raise ValueError(f"Unknown model: {model_name}")
     except Exception as e:

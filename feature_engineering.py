@@ -1,13 +1,13 @@
 """
 feature_engineering.py
 ──────────────────────
-48-feature engineering pipeline for crop price time-series.
+53-feature engineering pipeline for crop price time-series.
 
 Input : merged DataFrame with columns
         [date, modal_price, msp, min_price, max_price, arrivals_tonnes,
          rainfall_mm, max_temp, min_temp, freight_index, futures_price]
 
-Output: NaN-free DataFrame with exactly 48 numeric features.
+Output: NaN-free DataFrame with exactly 53 numeric features.
 """
 
 import numpy as np
@@ -22,8 +22,8 @@ _KHARIF_MONTHS = {6, 7, 8, 9}
 _DROUGHT_THRESHOLD_MM = 1.0  # 10-day cumulative rainfall below this → drought
 
 
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Transform the merged daily crop DataFrame into a 48-feature matrix.
+def engineer_features(df: pd.DataFrame, crop_name: str = None, msp_announcement_dates: dict = None) -> pd.DataFrame:
+    """Transform the merged daily crop DataFrame into a 53-feature matrix.
 
     Parameters
     ----------
@@ -31,11 +31,15 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         Must contain columns: date, modal_price, msp, min_price, max_price,
         arrivals_tonnes, rainfall_mm, max_temp, min_temp, freight_index,
         futures_price.  ``date`` must be parse-able by ``pd.to_datetime``.
+    crop_name : str, optional
+        Used to extract specific announcement dates.
+    msp_announcement_dates : dict, optional
+        Dictionary mapping crop names to lists of announcement dates.
 
     Returns
     -------
     pd.DataFrame
-        48-column feature matrix with all NaN rows removed.  The ``date``
+        53-column feature matrix with all NaN rows removed.  The ``date``
         column is **not** included in the output.
     """
     df = df.copy()
@@ -67,20 +71,52 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df["is_rabi"] = month.isin(_RABI_MONTHS).astype(int)
     df["is_kharif"] = month.isin(_KHARIF_MONTHS).astype(int)
 
-    # ── 6. MSP features (2) ─────────────────────────────────────────────────
+    # ── 6. MSP features (4) ─────────────────────────────────────────────────
     df["msp_distance"] = df["modal_price"] - df["msp"]
     df["msp_pct"] = (df["modal_price"] - df["msp"]) / df["msp"] * 100
+
+    df["days_since_msp_announcement"] = 0
+    df["msp_hike_pct"] = 0.0
+
+    if msp_announcement_dates and crop_name and crop_name in msp_announcement_dates:
+        ann_dates = pd.to_datetime(msp_announcement_dates[crop_name])
+        
+        last_ann_date = pd.NaT
+        days_since = []
+        for d in df["date"]:
+            past_anns = ann_dates[ann_dates <= d]
+            if len(past_anns) > 0:
+                days_since.append((d - past_anns.max()).days)
+            else:
+                days_since.append(0)
+        df["days_since_msp_announcement"] = days_since
+        
+        msp_shifted = df["msp"].shift(1)
+        hike_pct = np.zeros(len(df))
+        ann_mask = df["date"].isin(ann_dates) & df["msp"].notna() & msp_shifted.notna() & (msp_shifted > 0)
+        
+        hike_vals = (df.loc[ann_mask, "msp"] - msp_shifted[ann_mask]) / msp_shifted[ann_mask] * 100.0
+        hike_pct[ann_mask] = hike_vals.values
+        df["msp_hike_pct"] = hike_pct
 
     # ── 7. Rainfall / drought features (2) ───────────────────────────────────
     df["rainfall_roll_10d"] = df["rainfall_mm"].rolling(10).sum()
     df["drought_flag"] = (df["rainfall_roll_10d"] < _DROUGHT_THRESHOLD_MM).astype(int)
 
-    # ── 8. Market features (2) ───────────────────────────────────────────────
+    # ── 8. Market features (4) ───────────────────────────────────────────────
     freight_shifted = df["freight_index"].shift(7)
     df["freight_momentum"] = (
         (df["freight_index"] - freight_shifted) / freight_shifted * 100
     )
     df["futures_basis"] = df["modal_price"] - df["futures_price"]
+
+    df["futures_roll_signal"] = 0
+    df.loc[df["futures_price"] > df["modal_price"] * 1.05, "futures_roll_signal"] = 1
+    df.loc[df["futures_price"] < df["modal_price"] * 0.95, "futures_roll_signal"] = -1
+    
+    modal_pct = df["modal_price"].pct_change()
+    futures_pct = df["futures_price"].pct_change()
+    df["cbot_correlation_14d"] = modal_pct.rolling(14).corr(futures_pct).fillna(0)
 
     # ── 9. Derived price features (3) ────────────────────────────────────────
     df["price_spread"] = df["max_price"] - df["min_price"]
@@ -100,8 +136,13 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df["week_sin"] = np.sin(2 * np.pi * week / 52)
     df["week_cos"] = np.cos(2 * np.pi * week / 52)
 
+    # ── 12. Market concentration (1) ─────────────────────────────────────────
+    df["arrivals_market_share"] = df["arrivals_tonnes"] / df["arrivals_tonnes"].rolling(30).sum()
+    df["arrivals_market_share"] = df["arrivals_market_share"].fillna(0)
+
     # ── finalise ─────────────────────────────────────────────────────────────
     # Drop the date column (not a feature) and remove NaN rows
+
     df = df.drop(columns=["date"])
     df = df.dropna().reset_index(drop=True)
 
@@ -130,7 +171,8 @@ if __name__ == "__main__":
         }
     )
 
-    result = engineer_features(sample)
+    result = engineer_features(sample, crop_name="Wheat", msp_announcement_dates={"Wheat": ["2024-02-01"]})
     print(f"Output shape : {result.shape}")
     print(f"Columns ({len(result.columns)}): {list(result.columns)}")
     print(f"NaN count    : {result.isna().sum().sum()}")
+    assert result.shape[1] == 53, f"Expected 53 features, got {result.shape[1]}"

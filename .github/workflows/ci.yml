@@ -1,0 +1,128 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_mandi_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "requirements.txt"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+
+      - name: Run Database Migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_mandi_db
+        run: alembic upgrade head
+
+      - name: Run Tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_mandi_db
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: test-secret
+        run: pytest test_feature_engineering.py test_stationarity.py -v --tb=short
+
+      - name: Generate Coverage Report
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_mandi_db
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: test-secret
+        run: pytest --cov=. --cov-report=xml
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ruff
+        run: pip install ruff
+
+      - name: Run Ruff Check
+        run: ruff check . --select=E,F,W,I --ignore=E501
+
+      - name: Run Ruff Format Check
+        run: ruff format --check .
+
+  docker-build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker Image
+        run: docker build -t agriprice-sentinel:${{ github.sha }} .
+
+      - name: Login to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag & Push Image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag agriprice-sentinel:${{ github.sha }} ghcr.io/${{ github.repository }}/agriprice-sentinel:${{ github.sha }}
+          docker push ghcr.io/${{ github.repository }}/agriprice-sentinel:${{ github.sha }}
+
+  notify:
+    needs: [test, lint, docker-build]
+    if: failure()
+    always: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack Notification
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

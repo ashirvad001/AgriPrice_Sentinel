@@ -23,7 +23,7 @@ from forecast_model import build_hypermodel
 from database import AsyncSessionLocal, ShapExplanation, init_db
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1.  FEATURE NAMES  — 48 features from feature_engineering.py
+# 1.  FEATURE NAMES  — 53 features from feature_engineering.py
 # ═══════════════════════════════════════════════════════════════════════════════
 FEATURE_NAMES = [
     # Raw columns (10)
@@ -44,18 +44,22 @@ FEATURE_NAMES = [
     "arrivals_rmean_30", "arrivals_rstd_30",
     # Seasonality (4)
     "month_sin", "month_cos", "is_rabi", "is_kharif",
-    # MSP features (2)
+    # MSP features (4)
     "msp_distance", "msp_pct",
+    "days_since_msp_announcement", "msp_hike_pct",
     # Rainfall / drought (2)
     "rainfall_roll_10d", "drought_flag",
-    # Market (2)
+    # Market (4)
     "freight_momentum", "futures_basis",
+    "futures_roll_signal", "cbot_correlation_14d",
     # Derived price (3)
     "price_spread", "price_volatility", "price_momentum_7d",
     # Temperature (2)
     "temp_range", "temp_rmean_7",
     # Week-of-year seasonality (2)
     "week_sin", "week_cos",
+    # Market concentration (1)
+    "arrivals_market_share",
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -106,12 +110,16 @@ FARMER_LABELS = {
     # MSP
     "msp_distance":      "Price above/below MSP (₹)",
     "msp_pct":           "Price vs MSP (%)",
+    "days_since_msp_announcement": "Days since last MSP hike",
+    "msp_hike_pct":      "MSP increase over previous (%)",
     # Rainfall / drought
     "rainfall_roll_10d": "Rainfall (last 10 days)",
     "drought_flag":      "Drought risk indicator",
     # Market
     "freight_momentum":  "Transport cost trend (%)",
     "futures_basis":     "Spot vs futures gap (₹)",
+    "futures_roll_signal": "Futures market signal (-1,0,1)",
+    "cbot_correlation_14d": "Spot-Futures correlation (14d)",
     # Derived price
     "price_spread":      "Daily price range (₹)",
     "price_volatility":  "Price volatility index",
@@ -122,6 +130,8 @@ FARMER_LABELS = {
     # Week-of-year seasonality
     "week_sin":          "Week-of-year cycle (sine)",
     "week_cos":          "Week-of-year cycle (cosine)",
+    # Market concentration
+    "arrivals_market_share": "Arrivals vs 30d baseline (%)",
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════

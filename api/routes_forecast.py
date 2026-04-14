@@ -14,6 +14,28 @@ from api.schemas import ForecastResponse, ForecastDay
 from database import RawPrice
 from api.deps import cache_get, cache_set, get_db
 
+import os
+import mlflow
+import mlflow.keras
+
+# Configure MLflow tracking URI
+mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"))
+
+def load_crop_model(crop: str, mandi: str):
+    """
+    Tries MLflow model registry first before falling back to saved_models/ directory.
+    """
+    try:
+        model_uri = f"models:/CropPrice_{crop}_{mandi.replace(' ','_')}/Production"
+        return mlflow.keras.load_model(model_uri)
+    except Exception as e:
+        import tensorflow as tf
+        import logging
+        logging.info(f"MLflow load failed for {crop} at {mandi}, trying local fallback...")
+        local_path = os.path.join(os.path.dirname(__file__), "..", "saved_models", f"{crop.lower()}_{mandi.lower().replace(' ','_')}_model.keras")
+        if os.path.exists(local_path):
+            return tf.keras.models.load_model(local_path, compile=False)
+        return None
 router = APIRouter(prefix="/api/v1", tags=["Forecast"])
 
 # ── MSP lookup (₹ per quintal, 2025-26 Rabi & Kharif) ───────────────────────

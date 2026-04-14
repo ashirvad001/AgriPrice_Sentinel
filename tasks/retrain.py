@@ -5,7 +5,7 @@ Celery task that retrains LSTM crop models every Sunday at 2 AM.
 
 Pipeline per crop/mandi:
     1. Load 3 years of raw price data from PostgreSQL
-    2. Run feature engineering (48 features)
+    2. Run feature engineering (48 features) # now 54 features with new additions
     3. Build model with best hyperparameters from model_configs
     4. Train and evaluate on held-out test set
     5. Champion-challenger: promote only if RMSE improves > 2%
@@ -26,7 +26,10 @@ import pandas as pd
 import tensorflow as tf
 import keras_tuner as kt
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error
 import joblib
+import mlflow
+import mlflow.keras
 
 from celery_app import app as celery_app
 from feature_engineering import engineer_features
@@ -61,6 +64,10 @@ TARGET_CROPS = [
 MANDIS = ["Lucknow Mandi", "Indore Mandi", "Amritsar Mandi"]
 
 TARGET_CROP_MANDIS = [(crop, mandi) for crop in TARGET_CROPS for mandi in MANDIS]
+
+HIGH_DATA_CROPS = ["Wheat", "Rice", "Maize"]
+LOW_DATA_CROPS = ["Ragi", "Bajra", "Jowar", "Barley", "Sugarcane"]
+
 
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "saved_models")
 PROMOTION_THRESHOLD = 0.02  # 2% improvement required
@@ -260,154 +267,293 @@ def _send_slack_notification(message: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  CROSS-CROP TRANSFER LEARNING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def pretrain_shared_encoder(session: Session):
+    """
+    Pretrains a shared encoder on high-data crops (Wheat, Rice, Maize)
+    and saves the weights of the BiLSTM base layers for transfer learning.
+    """
+    logger.info(f"{'='*50}")
+    logger.info("PRETRAINING SHARED ENCODER (Wheat, Rice, Maize)")
+    logger.info(f"{'='*50}")
+
+    X_all, y_all = [], []
+    for crop in HIGH_DATA_CROPS:
+        for mandi in MANDIS:
+            try:
+                df = _load_crop_data(session, crop, mandi, years=LOOKBACK_YEARS)
+                if len(df) < 50:
+                    continue
+                features_df = engineer_features(df)
+                if len(features_df) < 200:
+                    continue
+
+                values = features_df.values.astype(np.float32)
+                scaler = MinMaxScaler()
+                scaled = scaler.fit_transform(values)
+
+                target_col = 0
+                targets = scaled[:, target_col]
+                multi_targets = np.column_stack([
+                    np.roll(targets, -i) for i in range(OUTPUT_STEPS)
+                ])[: -(OUTPUT_STEPS - 1)]
+                scaled_trimmed = scaled[: -(OUTPUT_STEPS - 1)]
+
+                X, y = _create_sequences(scaled_trimmed, multi_targets, SEQUENCE_LENGTH_DEFAULT)
+                X_all.append(X)
+                y_all.append(y)
+            except Exception as e:
+                logger.warning(f"Failed loading {crop} at {mandi} for pretrain: {e}")
+
+    if not X_all:
+        logger.warning("No data found for pretraining shared encoder.")
+        return
+
+    X_all = np.concatenate(X_all, axis=0)
+    y_all = np.concatenate(y_all, axis=0)
+
+    # Shuffle dataset
+    indices = np.random.permutation(len(X_all))
+    X_all = X_all[indices]
+    y_all = y_all[indices]
+
+    hp = kt.HyperParameters()
+    hp.Choice("lstm_units", [128])
+    hp.Choice("dropout", [0.2])
+    hp.Choice("learning_rate", [1e-3])
+
+    logger.info(f"Building pretrain model with ({len(X_all)} samples)...")
+    model = build_hypermodel(hp, input_shape=(SEQUENCE_LENGTH_DEFAULT, X_all.shape[-1]))
+
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(monitor="loss", patience=5, restore_best_weights=True)
+    ]
+    model.fit(X_all, y_all, epochs=50, batch_size=64, callbacks=callbacks, verbose=0)
+
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    shared_path = os.path.join(MODELS_DIR, "shared_encoder_weights.h5")
+    model.save_weights(shared_path)
+    logger.info(f"✅ Pretraining complete. Base weights saved to {shared_path}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CORE RETRAINING FUNCTION (per crop and mandi)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def retrain_single_crop(crop: str, mandi: str, session: Session) -> dict:
+def retrain_single_crop(crop: str, mandi: str, session: Session, use_transfer: bool = False) -> dict:
     """
     Full retraining pipeline for a single crop and mandi.
-
     Returns a dict with retraining metadata.
     """
     start_time = datetime.utcnow()
     t0 = time.time()
+    
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"))
+    run_name = f"{crop}_{mandi}_{start_time.date()}"
+    
     logger.info(f"{'='*50}")
     logger.info(f"RETRAINING: {crop} at {mandi}")
     logger.info(f"{'='*50}")
 
-    log_data: dict[str, Any] = {
-        "crop": crop,
-        "mandi": mandi,
-        "started_at": start_time,
-        "finished_at": None,
-        "duration_seconds": None,
-        "rmse_before": None,
-        "rmse_after": None,
-        "improvement_pct": None,
-        "model_promoted": False,
-        "feature_importance_delta": {},
-        "status": "running",
-        "error_message": None,
-    }
+    with mlflow.start_run(run_name=run_name):
+        log_data: dict[str, Any] = {
+            "crop": crop,
+            "mandi": mandi,
+            "started_at": start_time,
+            "finished_at": None,
+            "duration_seconds": None,
+            "rmse_before": None,
+            "rmse_after": None,
+            "improvement_pct": None,
+            "model_promoted": False,
+            "feature_importance_delta": {},
+            "status": "running",
+            "error_message": None,
+        }
 
-    try:
-        # ── 1. Load data ─────────────────────────────────────────────────
-        df = _load_crop_data(session, crop, mandi, years=LOOKBACK_YEARS)
-        logger.info(f"  Data loaded: {len(df)} rows")
+        try:
+            # ── 1. Load data ─────────────────────────────────────────────────
+            df = _load_crop_data(session, crop, mandi, years=LOOKBACK_YEARS)
+            logger.info(f"  Data loaded: {len(df)} rows")
 
-        # ── 2. Feature engineering ───────────────────────────────────────
-        features_df = engineer_features(df)
-        logger.info(f"  Features engineered: {features_df.shape}")
+            # ── 2. Feature engineering ───────────────────────────────────────
+            features_df = engineer_features(df)
+            logger.info(f"  Features engineered: {features_df.shape}")
 
-        if len(features_df) < 200:
-            raise ValueError(f"Insufficient data after feature engineering: {len(features_df)} rows")
+            if len(features_df) < 200:
+                raise ValueError(f"Insufficient data after feature engineering: {len(features_df)} rows")
 
-        # ── 3. Load best hyperparameters ─────────────────────────────────
-        best_hp = _load_best_hyperparams(session, crop)
-        seq_len = best_hp["sequence_length"]
-        batch_size = best_hp["batch_size"]
-        logger.info(f"  Hyperparams: units={best_hp['lstm_units']}, "
-                     f"dropout={best_hp['dropout']}, lr={best_hp['learning_rate']}, "
-                     f"seq={seq_len}, bs={batch_size}")
+            # ── 3. Load best hyperparameters ─────────────────────────────────
+            best_hp = _load_best_hyperparams(session, crop)
+            if use_transfer:
+                # Force target model to have matching encoder dims
+                best_hp["lstm_units"] = 128
+                best_hp["dropout"] = 0.2
 
-        # ── 4. Prepare train/test split ──────────────────────────────────
-        values = features_df.values.astype(np.float32)
-        scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(values)
+            seq_len = best_hp["sequence_length"]
+            batch_size = best_hp["batch_size"]
+            logger.info(f"  Hyperparams: units={best_hp['lstm_units']}, "
+                         f"dropout={best_hp['dropout']}, lr={best_hp['learning_rate']}, "
+                         f"seq={seq_len}, bs={batch_size}")
 
-        # Target = modal_price (column 0)
-        target_col = 0
-        targets = scaled[:, target_col]
-        # Expand targets to multi-step
-        multi_targets = np.column_stack([
-            np.roll(targets, -i) for i in range(OUTPUT_STEPS)
-        ])[: -(OUTPUT_STEPS - 1)]
-        scaled_trimmed = scaled[: -(OUTPUT_STEPS - 1)]
+            # ── 4. Prepare train/test split ──────────────────────────────────
+            values = features_df.values.astype(np.float32)
+            scaler = MinMaxScaler()
+            scaled = scaler.fit_transform(values)
 
-        X, y = _create_sequences(scaled_trimmed, multi_targets, seq_len)
-        logger.info(f"  Sequences: X={X.shape}, y={y.shape}")
+            # Target = modal_price (column 0)
+            target_col = 0
+            targets = scaled[:, target_col]
+            # Expand targets to multi-step
+            multi_targets = np.column_stack([
+                np.roll(targets, -i) for i in range(OUTPUT_STEPS)
+            ])[: -(OUTPUT_STEPS - 1)]
+            scaled_trimmed = scaled[: -(OUTPUT_STEPS - 1)]
 
-        # 80/20 temporal split
-        split = int(len(X) * 0.8)
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
+            X, y = _create_sequences(scaled_trimmed, multi_targets, seq_len)
+            logger.info(f"  Sequences: X={X.shape}, y={y.shape}")
 
-        # ── 5. Build model ───────────────────────────────────────────────
-        hp = kt.HyperParameters()
-        hp.Choice("lstm_units", [best_hp["lstm_units"]])
-        hp.Choice("dropout", [best_hp["dropout"]])
-        hp.Choice("learning_rate", [best_hp["learning_rate"]])
+            # 80/20 temporal split
+            split = int(len(X) * 0.8)
+            X_train, X_test = X[:split], X[split:]
+            y_train, y_test = y[:split], y[split:]
 
-        model = build_hypermodel(hp, input_shape=(seq_len, features_df.shape[1]))
-        logger.info(f"  Model built ({model.count_params():,} params)")
+            # ── 5. Build model ───────────────────────────────────────────────
+            hp = kt.HyperParameters()
+            hp.Choice("lstm_units", [best_hp["lstm_units"]])
+            hp.Choice("dropout", [best_hp["dropout"]])
+            hp.Choice("learning_rate", [best_hp["learning_rate"]])
 
-        # ── 6. Train ─────────────────────────────────────────────────────
-        callbacks = [
-            tf.keras.callbacks.EarlyStopping(
-                monitor="val_rmse", patience=10, restore_best_weights=True
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor="val_rmse", factor=0.5, patience=5, min_lr=1e-6
-            ),
-        ]
+            model = build_hypermodel(hp, input_shape=(seq_len, features_df.shape[1]))
 
-        model.fit(
-            X_train, y_train,
-            validation_data=(X_test, y_test),
-            epochs=100,
-            batch_size=batch_size,
-            callbacks=callbacks,
-            verbose=0,
-        )
-        logger.info("  Training complete")
+            if use_transfer:
+                shared_weights_path = os.path.join(MODELS_DIR, "shared_encoder_weights.h5")
+                if os.path.exists(shared_weights_path):
+                    model.load_weights(shared_weights_path, by_name=True, skip_mismatch=True)
+                    for layer in model.layers:
+                        if layer.name in ["bilstm_layer_1", "mc_dropout_1", "bilstm_layer_2", "mc_dropout_2"]:
+                            layer.trainable = False
+                    
+                    # Recompile model with frozen layers
+                    lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                        initial_learning_rate=best_hp["learning_rate"], decay_steps=1000, alpha=0.01
+                    )
+                    optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+                    model.compile(optimizer=optimizer, loss=tf.keras.losses.Huber(delta=1.0), metrics=["mean_squared_error"])
+                    
+                    logger.info("  [TL] Shared encoder weights loaded and frozen")
+                    log_data["feature_importance_delta"]["transfer_used"] = True
 
-        # ── 7. Evaluate ──────────────────────────────────────────────────
-        eval_result = model.evaluate(X_test, y_test, verbose=0)
-        new_rmse = eval_result[1] if len(eval_result) > 1 else eval_result[0]
-        log_data["rmse_after"] = float(new_rmse)  # type: ignore[arg-type]
-        logger.info(f"  New RMSE: {new_rmse:.4f}")
+            logger.info(f"  Model built ({model.count_params():,} params)")
 
-        # ── 8. Champion-Challenger ───────────────────────────────────────
-        deployed_rmse = _get_deployed_rmse(crop, mandi)
-        log_data["rmse_before"] = deployed_rmse
+            mlflow.log_params({
+                "lstm_units": best_hp["lstm_units"],
+                "dropout": best_hp["dropout"],
+                "learning_rate": best_hp["learning_rate"],
+                "sequence_length": seq_len,
+                "batch_size": batch_size,
+                "n_train_samples": len(X_train)
+            })
 
-        if deployed_rmse is not None:
-            improvement = (deployed_rmse - new_rmse) / deployed_rmse
-            log_data["improvement_pct"] = round(float(improvement * 100), 2)
-            logger.info(f"  Deployed RMSE: {deployed_rmse:.4f}, Improvement: {improvement*100:.1f}%")
+            # ── 6. Train ─────────────────────────────────────────────────────
+            callbacks = [
+                tf.keras.callbacks.EarlyStopping(
+                    monitor="val_rmse", patience=10, restore_best_weights=True
+                ),
+                tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor="val_rmse", factor=0.5, patience=5, min_lr=1e-6
+                ),
+            ]
 
-            if improvement > PROMOTION_THRESHOLD:
-                # ── Compute feature importance delta before overwriting ───
-                old_path = os.path.join(MODELS_DIR, f"{crop.lower()}_{mandi.lower().replace(' ', '_')}_model.keras")
-                fi_delta = _compute_feature_importance_delta(old_path, model, X_test)
+            epochs = 30 if use_transfer else 100
+
+            model.fit(
+                X_train, y_train,
+                validation_data=(X_test, y_test),
+                epochs=epochs,
+                batch_size=batch_size,
+                callbacks=callbacks,
+                verbose=0,
+            )
+            logger.info("  Training complete")
+
+            # ── 7. Evaluate ──────────────────────────────────────────────────
+            eval_result = model.evaluate(X_test, y_test, verbose=0)
+            new_rmse = eval_result[1] if len(eval_result) > 1 else eval_result[0]
+            log_data["rmse_after"] = float(new_rmse)
+            logger.info(f"  New RMSE: {new_rmse:.4f}")
+
+            preds = model.predict(X_test, verbose=0)
+            mae = mean_absolute_error(y_test, preds)
+            mape = mean_absolute_percentage_error(y_test, preds)
+
+            # ── 8. Champion-Challenger ───────────────────────────────────────
+            deployed_rmse = _get_deployed_rmse(crop, mandi)
+            log_data["rmse_before"] = deployed_rmse
+
+            if deployed_rmse is not None:
+                improvement = (deployed_rmse - new_rmse) / deployed_rmse
+                log_data["improvement_pct"] = round(float(improvement * 100), 2)
+                logger.info(f"  Deployed RMSE: {deployed_rmse:.4f}, Improvement: {improvement*100:.1f}%")
+
+                if improvement > PROMOTION_THRESHOLD:
+                    old_path = os.path.join(MODELS_DIR, f"{crop.lower()}_{mandi.lower().replace(' ', '_')}_model.keras")
+                    fi_delta = _compute_feature_importance_delta(old_path, model, X_test)
+                    log_data["feature_importance_delta"] = fi_delta
+
+                    _save_model(model, scaler, crop, mandi, new_rmse)
+                    log_data["model_promoted"] = True
+                    
+                    scaler_path = os.path.join(MODELS_DIR, f"{crop.lower()}_{mandi.lower().replace(' ', '_')}_scaler.pkl")
+                    mlflow.keras.log_model(model, artifact_path="model", registered_model_name=f"CropPrice_{crop}_{mandi.replace(' ','_')}")
+                    mlflow.log_artifact(scaler_path)
+                    
+                    logger.info(f"  ✅ MODEL PROMOTED (>{PROMOTION_THRESHOLD*100}% improvement)")
+                else:
+                    logger.info(f"  ⏸  Not promoted (improvement {improvement*100:.1f}% <= {PROMOTION_THRESHOLD*100}%)")
+            else:
+                fi_delta = _compute_feature_importance_delta("", model, X_test)
                 log_data["feature_importance_delta"] = fi_delta
-
                 _save_model(model, scaler, crop, mandi, new_rmse)
                 log_data["model_promoted"] = True
-                logger.info(f"  ✅ MODEL PROMOTED (>{PROMOTION_THRESHOLD*100}% improvement)")
-            else:
-                logger.info(f"  ⏸  Not promoted (improvement {improvement*100:.1f}% <= {PROMOTION_THRESHOLD*100}%)")
-        else:
-            # No existing model → always save
-            fi_delta = _compute_feature_importance_delta("", model, X_test)
-            log_data["feature_importance_delta"] = fi_delta
-            _save_model(model, scaler, crop, mandi, new_rmse)
-            log_data["model_promoted"] = True
-            log_data["improvement_pct"] = 100.0
-            logger.info("  ✅ First model saved (no prior deployment)")
+                log_data["improvement_pct"] = 100.0
+                
+                scaler_path = os.path.join(MODELS_DIR, f"{crop.lower()}_{mandi.lower().replace(' ', '_')}_scaler.pkl")
+                mlflow.keras.log_model(model, artifact_path="model", registered_model_name=f"CropPrice_{crop}_{mandi.replace(' ','_')}")
+                mlflow.log_artifact(scaler_path)
+                
+                logger.info("  ✅ First model saved (no prior deployment)")
 
-        log_data["status"] = "success"
+            log_data["status"] = "success"
 
-    except Exception as e:
-        log_data["status"] = "failed"
-        log_data["error_message"] = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-        logger.error(f"  ❌ FAILED: {e}")
+        except Exception as e:
+            log_data["status"] = "failed"
+            log_data["error_message"] = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            logger.error(f"  ❌ FAILED: {e}")
 
-    finally:
-        elapsed = time.time() - t0
-        log_data["finished_at"] = datetime.utcnow()
-        log_data["duration_seconds"] = round(float(elapsed), 1)
-        logger.info(f"  Duration: {elapsed:.1f}s")
+        finally:
+            elapsed = time.time() - t0
+            log_data["finished_at"] = datetime.utcnow()
+            log_data["duration_seconds"] = round(float(elapsed), 1)
+            
+            mlflow.log_metrics({
+                "rmse_before": float(log_data["rmse_before"] or 0.0),
+                "rmse_after": float(log_data["rmse_after"] or 0.0),
+                "improvement_pct": float(log_data["improvement_pct"] or 0.0),
+                "training_time_s": float(elapsed),
+                "mae": float(mae) if 'mae' in locals() else 0.0,
+                "mape": float(mape) if 'mape' in locals() else 0.0
+            })
+            mlflow.set_tags({
+                "crop": crop,
+                "mandi": mandi,
+                "model_promoted": log_data["model_promoted"],
+                "status": log_data["status"]
+            })
+            
+            logger.info(f"  Duration: {elapsed:.1f}s")
 
     return log_data
 
@@ -422,15 +568,15 @@ def retrain_all_models(self):
     Celery task: retrain all LSTM crop+mandi models.
 
     Scheduled via celery-beat for every Sunday at 2:00 AM IST.
-    Can also be triggered manually:
-        from tasks.retrain import retrain_all_models
-        retrain_all_models.delay()
     """
     overall_start = time.time()
     logger.info("=" * 60)
     logger.info(f"  WEEKLY LSTM RETRAINING — {len(TARGET_CROP_MANDIS)} Crop-Mandi Combinations")
     logger.info(f"  Started at: {datetime.utcnow().isoformat()}")
     logger.info("=" * 60)
+
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"))
+    mlflow.set_experiment("weekly_lstm_retraining")
 
     results = {"promoted": [], "skipped": [], "failed": []}
 
@@ -442,10 +588,15 @@ def retrain_all_models(self):
         session = SyncSession()
 
     try:
+        if session:
+            # First Pretrain Shared Encoder
+            pretrain_shared_encoder(session)
+
         for crop, mandi in TARGET_CROP_MANDIS:
             name = f"{crop} at {mandi}"
             try:
-                log_data = retrain_single_crop(crop, mandi, session)
+                use_transfer = crop in LOW_DATA_CROPS
+                log_data = retrain_single_crop(crop, mandi, session, use_transfer=use_transfer)
 
                 # Log to PostgreSQL
                 if session:

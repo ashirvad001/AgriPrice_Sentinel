@@ -165,6 +165,23 @@ services:
     networks:
       - msp_net
 
+  # 11. MLflow Tracking Server
+  mlflow:
+    image: mlflow/mlflow:latest
+    container_name: msp_mlflow
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >-
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+    networks:
+      - msp_net
+
 networks:
   msp_net:
     name: msp_net
@@ -175,3 +192,4 @@ volumes:
   redis_data:
   prometheus_data:
   grafana_data:
+  mlflow_data:

@@ -101,7 +101,10 @@ TWILIO_AUTH_TOKEN=...
 
 ### 2. Database Initialization & Running the API
 ```bash
-# The lifespan hook auto-creates SQLAlchemy tables on first run.
+# Run database migrations to create tables
+alembic upgrade head
+
+# Start the Fast API application
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 *API Docs available at: `http://localhost:8000/docs`*

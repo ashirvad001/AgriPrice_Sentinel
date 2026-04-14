@@ -35,13 +35,16 @@ from api.routes_shap import router as shap_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Async lifespan handler: init DB tables and Redis pool on startup."""
-    # ── Startup ──────────────────────────────────────────────────────────
     print("🚀  Starting AgriPrice Sentinel API…")
     try:
-        await init_db()
-        print("✅  Database tables ready")
+        import alembic.config
+        alembic.config.main(argv=["upgrade", "head"])
+        print("✅  Database migrations applied")
     except Exception as e:
-        print(f"⚠  Database init skipped ({e})")
+        print(f"⚠  Database migration skipped ({e})")
+        # Fallback for SQLite or when alembic is not configured
+        await init_db()
+        print("✅  Database tables initialized via SQLAlchemy")
 
     await init_redis()
 
