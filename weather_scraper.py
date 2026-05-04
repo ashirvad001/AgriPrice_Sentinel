@@ -14,7 +14,7 @@ import os
 import asyncio
 import logging
 import aiohttp
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -173,7 +173,7 @@ async def process_district_weather(
             crop="WEATHER_API",
             state=district,
             error_message=str(e),
-            failed_at=datetime.utcnow(),
+            failed_at=datetime.now(timezone.utc),
         )
         db_session.add(scrape_error)
 

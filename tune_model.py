@@ -6,7 +6,7 @@ import keras_tuner as kt
 from sklearn.model_selection import TimeSeriesSplit
 from database import AsyncSessionLocal, ModelConfig, init_db
 from forecast_model import build_hypermodel
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Disable GPU/OneDNN info logs to keep output clean
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -93,7 +93,7 @@ async def save_best_config(crop_name, best_hp, best_rmse):
             sequence_length=best_hp.get('sequence_length'),
             batch_size=best_hp.get('batch_size'),
             rmse=float(best_rmse),
-            optimized_at=datetime.utcnow()
+            optimized_at=datetime.now(timezone.utc)
         )
         session.add(config)
         await session.commit()

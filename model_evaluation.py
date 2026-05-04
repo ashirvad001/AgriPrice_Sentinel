@@ -23,7 +23,7 @@ import time
 import logging
 import argparse
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from itertools import product
 from dataclasses import dataclass, asdict, field
 from typing import Any
@@ -103,7 +103,7 @@ class ExperimentResult:
     training_time_s: float
     n_train_samples: int
     n_test_samples: int
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 # ─────────────────────────────────────────────────────────────────────────────

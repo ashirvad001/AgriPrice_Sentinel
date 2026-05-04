@@ -48,7 +48,7 @@ class BahdanauAttention(layers.Layer):
         config.update({'units': self.units})
         return config
 
-def build_hypermodel(hp, input_shape=(None, 48), output_steps=30):
+def build_hypermodel(hp, input_shape=(None, 53), output_steps=30):
     """
     Builds a Bidirectional LSTM HyperModel with Bahdanau attention and MC Dropout
     for multi-step crop price forecasting using Keras Tuner.
@@ -124,7 +124,7 @@ def get_mc_dropout_predictions(model, X, n_iter=100, confidence_level=0.95):
     
     Args:
         model: Trained Keras model with MCDropout layers.
-        X: Input data for prediction - shape (batch_size, 60, 48).
+        X: Input data for prediction - shape (batch_size, seq_len, 53).
         n_iter: Number of stochastic forward passes (default 100).
         confidence_level: Desired confidence interval (e.g., 0.95 for 95%).
         

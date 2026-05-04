@@ -5,7 +5,7 @@ Pydantic v2 request / response models for the AgriPrice Sentinel API.
 """
 
 from __future__ import annotations
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -81,7 +81,7 @@ class ForecastResponse(BaseModel):
     recommendation: str = Field(description="SELL or HOLD based on MSP comparison")
     recommendation_reason: str
     forecast: list[ForecastDay]
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

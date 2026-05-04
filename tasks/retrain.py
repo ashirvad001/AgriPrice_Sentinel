@@ -5,7 +5,7 @@ Celery task that retrains LSTM crop models every Sunday at 2 AM.
 
 Pipeline per crop/mandi:
     1. Load 3 years of raw price data from PostgreSQL
-    2. Run feature engineering (48 features) # now 54 features with new additions
+    2. Run feature engineering (53 features)
     3. Build model with best hyperparameters from model_configs
     4. Train and evaluate on held-out test set
     5. Champion-challenger: promote only if RMSE improves > 2%
@@ -19,7 +19,7 @@ import json
 import traceback
 import logging
 from typing import Any
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 
 import numpy as np
 import pandas as pd
@@ -37,24 +37,46 @@ from forecast_model import build_hypermodel
 
 # ── Sync SQLAlchemy for Celery workers (Celery is synchronous) ───────────────
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from dotenv import load_dotenv
 
 load_dotenv()
 
-_SYNC_DB_URL = os.getenv(
-    "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/postgres"
-).replace("+asyncpg", "+psycopg2").replace("asyncpg://", "psycopg2://")
 
-try:
-    sync_engine = create_engine(_SYNC_DB_URL, echo=False)
-    SyncSession = sessionmaker(bind=sync_engine)
-except Exception:
-    sync_engine = None
-    SyncSession = None
+def _build_sync_url(async_url_str: str) -> str:
+    """Convert an async database URL to its synchronous equivalent."""
+    url = make_url(async_url_str)
+    # Map async drivers to their sync equivalents
+    driver_map = {
+        "postgresql+asyncpg": "postgresql+psycopg2",
+        "postgresql+aiopg": "postgresql+psycopg2",
+        "postgresql": "postgresql+psycopg2",
+        "sqlite+aiosqlite": "sqlite",
+    }
+    new_driver = driver_map.get(url.drivername, url.drivername)
+    return str(url.set(drivername=new_driver))
+
 
 logger = logging.getLogger("retrain")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
+
+_raw_db_url = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/postgres",
+)
+
+try:
+    _SYNC_DB_URL = _build_sync_url(_raw_db_url)
+    sync_engine = create_engine(_SYNC_DB_URL, echo=False, pool_pre_ping=True)
+    SyncSession = sessionmaker(bind=sync_engine)
+    logger.info(f"Sync DB engine created: {_SYNC_DB_URL.split('@')[-1]}")
+except Exception as e:
+    logger.error(f"Failed to create sync DB engine: {e}")
+    sync_engine = None
+    SyncSession = None
+
+
 
 # ── Constants ────────────────────────────────────────────────────────────────
 TARGET_CROPS = [
@@ -347,7 +369,7 @@ def retrain_single_crop(crop: str, mandi: str, session: Session, use_transfer: b
     Full retraining pipeline for a single crop and mandi.
     Returns a dict with retraining metadata.
     """
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
     t0 = time.time()
     
     mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"))
@@ -535,7 +557,7 @@ def retrain_single_crop(crop: str, mandi: str, session: Session, use_transfer: b
 
         finally:
             elapsed = time.time() - t0
-            log_data["finished_at"] = datetime.utcnow()
+            log_data["finished_at"] = datetime.now(timezone.utc)
             log_data["duration_seconds"] = round(float(elapsed), 1)
             
             mlflow.log_metrics({
@@ -563,16 +585,31 @@ def retrain_single_crop(crop: str, mandi: str, session: Session, use_transfer: b
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @celery_app.task(name="tasks.retrain.retrain_all_models", bind=True, max_retries=1)
-def retrain_all_models(self):
+def retrain_all_models(self, crops=None):
     """
-    Celery task: retrain all LSTM crop+mandi models.
+    Celery task: retrain LSTM crop+mandi models.
 
     Scheduled via celery-beat for every Sunday at 2:00 AM IST.
+    Can also be triggered selectively by drift detection with a specific crop list.
+
+    Parameters
+    ----------
+    crops : list[str] | None
+        If provided, only retrain these crops (from drift detection).
+        If None, retrain all TARGET_CROP_MANDIS.
     """
+    # Determine which crop/mandi pairs to retrain
+    if crops:
+        pairs = [(c, m) for c, m in TARGET_CROP_MANDIS if c in crops]
+        label = f"{len(pairs)} Crop-Mandi pairs (selective: {crops})"
+    else:
+        pairs = TARGET_CROP_MANDIS
+        label = f"{len(pairs)} Crop-Mandi Combinations"
+
     overall_start = time.time()
     logger.info("=" * 60)
-    logger.info(f"  WEEKLY LSTM RETRAINING — {len(TARGET_CROP_MANDIS)} Crop-Mandi Combinations")
-    logger.info(f"  Started at: {datetime.utcnow().isoformat()}")
+    logger.info(f"  LSTM RETRAINING — {label}")
+    logger.info(f"  Started at: {datetime.now(timezone.utc).isoformat()}")
     logger.info("=" * 60)
 
     mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"))
@@ -587,15 +624,29 @@ def retrain_all_models(self):
     else:
         session = SyncSession()
 
-    try:
-        if session:
-            # First Pretrain Shared Encoder
-            pretrain_shared_encoder(session)
+    # Track whether pretraining has been done this run
+    _pretrained_this_run = False
 
-        for crop, mandi in TARGET_CROP_MANDIS:
+    try:
+        for crop, mandi in pairs:
             name = f"{crop} at {mandi}"
             try:
                 use_transfer = crop in LOW_DATA_CROPS
+
+                # Pretrain shared encoder on first LOW_DATA crop (lazy, with staleness guard)
+                if use_transfer and session and not _pretrained_this_run:
+                    shared_path = os.path.join(MODELS_DIR, "shared_encoder_weights.h5")
+                    should_pretrain = True
+                    if os.path.exists(shared_path):
+                        mtime = datetime.fromtimestamp(os.path.getmtime(shared_path), tz=timezone.utc)
+                        age_days = (datetime.now(timezone.utc) - mtime).days
+                        if age_days < 6:
+                            logger.info(f"  Shared encoder weights are {age_days}d old — skipping pretraining")
+                            should_pretrain = False
+                    if should_pretrain:
+                        pretrain_shared_encoder(session)
+                    _pretrained_this_run = True
+
                 log_data = retrain_single_crop(crop, mandi, session, use_transfer=use_transfer)
 
                 # Log to PostgreSQL

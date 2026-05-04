@@ -55,14 +55,14 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_mandi_db
           REDIS_URL: redis://localhost:6379/0
           JWT_SECRET: test-secret
-        run: pytest test_feature_engineering.py test_stationarity.py -v --tb=short
+        run: pytest test_feature_engineering.py test_stationarity.py test_routes_forecast.py -v --tb=short
 
       - name: Generate Coverage Report
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_mandi_db
           REDIS_URL: redis://localhost:6379/0
           JWT_SECRET: test-secret
-        run: pytest --cov=. --cov-report=xml
+        run: pytest --cov=. --cov-report=xml --cov-fail-under=60
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
@@ -114,8 +114,7 @@ jobs:
 
   notify:
     needs: [test, lint, docker-build]
-    if: failure()
-    always: true
+    if: always() && (needs.test.result == 'failure' || needs.lint.result == 'failure' || needs.docker-build.result == 'failure')
     runs-on: ubuntu-latest
     steps:
       - name: Send Slack Notification

@@ -28,6 +28,13 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           REDIS_URL: ${{ secrets.REDIS_URL }}
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          CELERY_TASK_ALWAYS_EAGER: "1"
         run: |
-          echo "Triggering model retraining..."
-          celery -A celery_app call tasks.retrain.retrain_all_models
+          echo "Triggering model retraining (eager mode — no broker required)..."
+          python -c "
+          import os
+          os.environ.setdefault('CELERY_TASK_ALWAYS_EAGER', '1')
+          from tasks.retrain import retrain_all_models
+          retrain_all_models()
+          "

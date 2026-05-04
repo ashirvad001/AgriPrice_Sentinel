@@ -12,9 +12,10 @@ import os
 import asyncio
 import logging
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timezone
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from database import AsyncSessionLocal, RawPrice, ScrapeError
 from dotenv import load_dotenv
 
@@ -111,7 +112,7 @@ async def process_crop_state(
     crop: str,
     state: str,
 ):
-    """Fetch Agmarknet data for a crop/state pair, parse, and save to DB."""
+    """Fetch Agmarknet data for a crop/state pair, parse, and upsert to DB."""
     try:
         records = await fetch_api_data(http_session, crop, state)
 
@@ -120,7 +121,7 @@ async def process_crop_state(
             logger.info(f"No records returned for {crop}/{state} — skipping")
             return
 
-        inserted = 0
+        upserted = 0
         for rec in records:
             # Parse the arrival date → use as fetch_date
             arrival_dt = _parse_arrival_date(rec.get("arrival_date", ""))
@@ -139,16 +140,24 @@ async def process_crop_state(
                 "arrivals_tonnes": _parse_price(rec.get("arrivals", None)),
             }
 
-            raw_price = RawPrice(
+            # Upsert: insert or update on (crop, state, fetch_date) conflict
+            stmt = pg_insert(RawPrice).values(
                 crop=crop,
                 state=state,
                 fetch_date=fetch_date,
                 raw_data=raw_data,
             )
-            db_session.add(raw_price)
-            inserted += 1
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_rawprice_crop_state_date",
+                set_={
+                    "raw_data": stmt.excluded.raw_data,
+                    "created_at": datetime.now(timezone.utc),
+                },
+            )
+            await db_session.execute(stmt)
+            upserted += 1
 
-        logger.info(f"Inserted {inserted} records for {crop}/{state}")
+        logger.info(f"Upserted {upserted} records for {crop}/{state}")
 
     except Exception as e:
         logger.error(f"Failed to fetch {crop} for {state}: {e}")
@@ -156,7 +165,7 @@ async def process_crop_state(
             crop=crop,
             state=state,
             error_message=str(e),
-            failed_at=datetime.utcnow(),
+            failed_at=datetime.now(timezone.utc),
         )
         db_session.add(scrape_error)
 

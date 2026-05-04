@@ -39,8 +39,8 @@ The platform provides a Next.js dashboard for visualizing trends, SHAP-based mod
 *   **Database:** PostgreSQL (Core Data), Redis (Caching & Task Broker)
 *   **External APIs:** Twilio (WhatsApp), OpenWeatherMap / IMD (Weather Data)
 
-### Data Pipeline (48-Feature Matrix)
-The feature engineering pipeline transforms raw price and weather data into a 48-feature dataset:
+### Data Pipeline (53-Feature Matrix)
+The feature engineering pipeline transforms raw price and weather data into a 53-feature dataset:
 1.  **Price Lags & Rolling Stats**: Capturing short-term momentum (7d, 14d, 30d, 60d, 90d).
 2.  **Seasonality**: Fourier encodings (sine/cosine) for month and week to capture harvest cycles.
 3.  **Market Signals**: Distance from Minimum Support Price (MSP), price spread, and futures basis.
@@ -86,17 +86,23 @@ venv\Scripts\activate  # Windows
 # Install dependencies
 pip install -r requirements.txt
 
-# Create .env file with your credentials
+# Create .env file from the example template
 cp .env.example .env
+
+# Generate a secure JWT secret (REQUIRED — app will not start without it)
+python -c "import secrets; print(secrets.token_hex(32))"
+# Paste the output into .env as JWT_SECRET=<generated_value>
 ```
 
-**Required `.env` Variables:**
+**Required `.env` Variables** (see `.env.example` for full reference):
 ```env
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/mandi_db
 REDIS_URL=redis://localhost:6379/0
-SECRET_KEY=your_jwt_secret_here
-TWILIO_ACCOUNT_SID=AC...
-TWILIO_AUTH_TOKEN=...
+JWT_SECRET=<your-64-char-hex-secret>   # python -c 'import secrets; print(secrets.token_hex(32))'
+JWT_EXPIRE_MINUTES=1440
+DATAGOV_API_KEY=<your-data-gov-in-key>
+TWILIO_ACCOUNT_SID=AC...               # optional — for WhatsApp alerts
+TWILIO_AUTH_TOKEN=...                   # optional — for WhatsApp alerts
 ```
 
 ### 2. Database Initialization & Running the API

@@ -135,6 +135,24 @@ async def get_nlp_fallback(query: str, session: dict) -> str:
         return LANG_MAP[lang]["error"]
 
 
+import re
+
+# ── Input sanitisation ───────────────────────────────────────────────────────
+_VALID_INPUT_PATTERN = re.compile(r"[^a-zA-Z0-9 \-]")
+_MAX_INPUT_LENGTH = 50
+
+
+def _sanitize_input(value: str) -> str:
+    """Sanitise crop/mandi values from user input.
+
+    - Strip to alphanumeric + spaces + hyphens only
+    - Max 50 characters
+    - Returns empty string if nothing remains after sanitisation
+    """
+    cleaned = _VALID_INPUT_PATTERN.sub("", value).strip()
+    return cleaned[:_MAX_INPUT_LENGTH]
+
+
 async def process_whatsapp_message(
     body: str,
     from_number: str,
@@ -175,9 +193,13 @@ async def process_whatsapp_message(
     try:
         # ── Command: Subscribe ──
         if tokens[0] == "subscribe" and len(tokens) >= 3:
-            crop = tokens[1]
-            mandi = " ".join(tokens[2:])
-            
+            crop = _sanitize_input(tokens[1])
+            mandi = _sanitize_input(" ".join(tokens[2:]))
+
+            if not crop or not mandi:
+                resp.message(LANG_MAP[lang]["error"])
+                return str(resp)
+
             # Save to db
             sub = AlertSubscription(
                 phone_number=from_number.replace("whatsapp:", ""),
@@ -200,8 +222,13 @@ async def process_whatsapp_message(
 
         # ── Command: History ──
         if tokens[0] == "history" and len(tokens) >= 3:
-            crop = tokens[1]
-            mandi = " ".join(tokens[2:])
+            crop = _sanitize_input(tokens[1])
+            mandi = _sanitize_input(" ".join(tokens[2:]))
+
+            if not crop or not mandi:
+                resp.message(LANG_MAP[lang]["error"])
+                return str(resp)
+
             history_data = await get_prices(crop=crop, mandi=mandi, days=30, db=db)
             
             if not history_data.prices:
@@ -221,10 +248,13 @@ async def process_whatsapp_message(
 
         # ── Command: Forecast (e.g. "wheat amritsar") ──
         if len(tokens) >= 2 and tokens[0] not in ["subscribe", "history", "help", "language"]:
-            # Let's see if first token is a known crop (very naive check, better to have a list)
-            crop = tokens[0]
-            mandi = " ".join(tokens[1:])
-            
+            crop = _sanitize_input(tokens[0])
+            mandi = _sanitize_input(" ".join(tokens[1:]))
+
+            if not crop or not mandi:
+                resp.message(LANG_MAP[lang]["error"])
+                return str(resp)
+
             # Use out 7-day forecast logic from router
             f_data = await get_forecast(crop=crop, mandi=mandi, horizon=7)
             
@@ -258,3 +288,4 @@ async def process_whatsapp_message(
         logger.error(f"WhatsApp Bot Error: {e}", exc_info=True)
         resp.message(LANG_MAP[lang]["error"])
         return str(resp)
+

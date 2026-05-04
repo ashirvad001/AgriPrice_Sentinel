@@ -75,9 +75,10 @@ async def async_send_daily_alerts():
                     trigger = True
 
                 if trigger:
-                    # Send Twilio Template! Wait, we use the template given by the user 
-                    # as a test which has 2 variables: {"1":"text", "2":"text"}
-                    template_sid = 'HX07f5f3a8427e20682e1db46ae7864e7b'
+                    template_sid = os.getenv('TWILIO_TEMPLATE_SID')
+                    if not template_sid:
+                        logger.warning("TWILIO_TEMPLATE_SID not set — skipping alert")
+                        continue
                     
                     variables = {
                         "1": f"{sub.crop.title()} @ {sub.mandi.title()}",

@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import tensorflow as tf
 import keras_tuner as kt
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from forecast_model import build_hypermodel
 from database import AsyncSessionLocal, ShapExplanation, init_db
 
@@ -411,7 +411,7 @@ class CropShapExplainer:
                 feature_value=float(mean_feat_vals[i]) if i < len(mean_feat_vals) else None,
                 farmer_label=FARMER_LABELS.get(fname, fname),
                 rank=rank,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
             ))
 
         async with AsyncSessionLocal() as session:
@@ -433,13 +433,13 @@ async def main():
     hp.Choice("lstm_units", [128])
     hp.Choice("dropout", [0.2])
     hp.Choice("learning_rate", [1e-3])
-    model = build_hypermodel(hp, input_shape=(60, 48))
+    model = build_hypermodel(hp, input_shape=(60, 53))
     print(f"✓ Model built  ({model.count_params():,} params)")
 
     # ── Synthetic data ───────────────────────────────────────────────────────
     np.random.seed(42)
     tf.random.set_seed(42)
-    n_bg, n_test, seq_len, n_feat = 50, 10, 60, 48
+    n_bg, n_test, seq_len, n_feat = 50, 10, 60, 53
 
     X_background = np.random.randn(n_bg, seq_len, n_feat).astype(np.float32)
     X_test       = np.random.randn(n_test, seq_len, n_feat).astype(np.float32)

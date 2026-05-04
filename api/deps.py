@@ -7,7 +7,7 @@ FastAPI dependency injection: DB session, Redis client, JWT-based current user.
 import os
 import json
 from typing import AsyncGenerator, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -18,7 +18,16 @@ from sqlalchemy import select
 from database import AsyncSessionLocal, User
 
 # ── Config ───────────────────────────────────────────────────────────────────
-JWT_SECRET = os.getenv("JWT_SECRET", "agriprice-sentinel-secret-key-change-in-prod")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET environment variable must be set. Generate one with: "
+        "python -c 'import secrets; print(secrets.token_hex(32))'"
+    )
+if len(JWT_SECRET) < 32:
+    raise RuntimeError(
+        "JWT_SECRET must be at least 32 characters long for security."
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))  # 24 hours
 
@@ -89,7 +98,7 @@ async def cache_set(key: str, value: dict, ttl: int = 3600):
 def create_access_token(user_id: int, phone: str) -> tuple[str, int]:
     """Create a JWT access token. Returns (token, expires_in_seconds)."""
     expires_delta = timedelta(minutes=JWT_EXPIRE_MINUTES)
-    expire = datetime.utcnow() + expires_delta
+    expire = datetime.now(timezone.utc) + expires_delta
     payload = {
         "sub": str(user_id),
         "phone": phone,

@@ -1,7 +1,7 @@
 """
 test_feature_engineering.py
 ───────────────────────────
-Pytest suite for the 48-feature crop price engineering pipeline.
+Pytest suite for the 53-feature crop price engineering pipeline.
 """
 
 import numpy as np
@@ -46,9 +46,9 @@ class TestEngineerFeatures:
         self.df = _make_sample_df(180)
         self.result = engineer_features(self.df)
 
-    def test_output_has_48_columns(self):
-        assert self.result.shape[1] == 48, (
-            f"Expected 48 columns, got {self.result.shape[1]}: {list(self.result.columns)}"
+    def test_output_has_53_columns(self):
+        assert self.result.shape[1] == 53, (
+            f"Expected 53 columns, got {self.result.shape[1]}: {list(self.result.columns)}"
         )
 
     def test_no_nan_values(self):
@@ -154,7 +154,7 @@ class TestEdgeCases:
         df = _make_sample_df(180)
         shuffled = df.sample(frac=1, random_state=99).reset_index(drop=True)
         result = engineer_features(shuffled)
-        assert result.shape[1] == 48
+        assert result.shape[1] == 53
         assert result.isna().sum().sum() == 0
 
     def test_string_dates_accepted(self):
@@ -162,7 +162,7 @@ class TestEdgeCases:
         df = _make_sample_df(180)
         df["date"] = df["date"].astype(str)
         result = engineer_features(df)
-        assert result.shape[1] == 48
+        assert result.shape[1] == 53
 
     def test_original_df_not_mutated(self):
         """engineer_features must not modify the caller's DataFrame."""

@@ -46,6 +46,7 @@ async def subscribe_alert(
         crop=body.crop,
         mandi=body.mandi,
         threshold_price=body.threshold_price,
+        language="English",
         is_active=True,
     )
     db.add(sub)

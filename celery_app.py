@@ -14,6 +14,7 @@ Start the beat scheduler:
 import os
 from celery import Celery
 from celery.schedules import crontab
+from kombu import Queue
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,7 +26,7 @@ app = Celery(
     "agriprice_sentinel",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks.retrain", "tasks.alerts"],
+    include=["tasks.retrain", "tasks.alerts", "tasks.drift_detection"],
 )
 
 # ── Celery configuration ────────────────────────────────────────────────────
@@ -42,15 +43,32 @@ app.conf.update(
     worker_max_tasks_per_child=4,  # restart worker after 4 tasks to prevent memory leaks
 )
 
-# ── Beat schedule: retrain every Sunday at 2:00 AM IST ───────────────────────
+# ── Queue declarations ──────────────────────────────────────────────────────
+app.conf.task_queues = [
+    Queue("default"),
+    Queue("retrain", routing_key="retrain"),
+    Queue("alerts",  routing_key="alerts"),
+]
+app.conf.task_default_queue = "default"
+
+# ── Beat schedule ────────────────────────────────────────────────────────────
+# All times in Asia/Kolkata (IST = UTC+5:30)
+# Sunday 2:00 AM IST = Saturday 20:30 UTC
+# Monday 3:00 AM IST = Sunday 21:30 UTC
 app.conf.beat_schedule = {
     "weekly-lstm-retrain": {
         "task": "tasks.retrain.retrain_all_models",
+        "schedule": crontab(hour=2, minute=0, day_of_week="sunday"),
         "options": {"queue": "retrain"},
     },
     "daily-price-alerts": {
         "task": "tasks.alerts.send_daily_alerts",
         "schedule": crontab(hour=6, minute=0),
         "options": {"queue": "alerts"},
+    },
+    "weekly-drift-detection": {
+        "task": "tasks.drift_detection.detect_drift_weekly",
+        "schedule": crontab(hour=3, minute=0, day_of_week="monday"),
+        "options": {"queue": "default"},
     },
 }
