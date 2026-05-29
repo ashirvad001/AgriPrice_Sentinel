@@ -15,7 +15,7 @@ import aiohttp
 from datetime import datetime, timezone
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select, and_
 from database import AsyncSessionLocal, RawPrice, ScrapeError
 from dotenv import load_dotenv
 
@@ -140,21 +140,27 @@ async def process_crop_state(
                 "arrivals_tonnes": _parse_price(rec.get("arrivals", None)),
             }
 
-            # Upsert: insert or update on (crop, state, fetch_date) conflict
-            stmt = pg_insert(RawPrice).values(
-                crop=crop,
-                state=state,
-                fetch_date=fetch_date,
-                raw_data=raw_data,
+            # Dialect-agnostic upsert: select existing, then update or insert
+            existing_stmt = select(RawPrice).where(
+                and_(
+                    RawPrice.crop == crop,
+                    RawPrice.state == state,
+                    RawPrice.fetch_date == fetch_date,
+                )
             )
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_rawprice_crop_state_date",
-                set_={
-                    "raw_data": stmt.excluded.raw_data,
-                    "created_at": datetime.now(timezone.utc),
-                },
-            )
-            await db_session.execute(stmt)
+            existing_result = await db_session.execute(existing_stmt)
+            existing_row = existing_result.scalar_one_or_none()
+
+            if existing_row:
+                existing_row.raw_data = raw_data
+                existing_row.created_at = datetime.now(timezone.utc)
+            else:
+                db_session.add(RawPrice(
+                    crop=crop,
+                    state=state,
+                    fetch_date=fetch_date,
+                    raw_data=raw_data,
+                ))
             upserted += 1
 
         logger.info(f"Upserted {upserted} records for {crop}/{state}")
