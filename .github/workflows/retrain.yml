@@ -37,6 +37,6 @@ jobs:
           python -c "
           import os
           os.environ.setdefault('CELERY_TASK_ALWAYS_EAGER', '1')
-          from tasks.retrain import retrain_all_models
+          from app.tasks.retrain import retrain_all_models
           retrain_all_models()
           "

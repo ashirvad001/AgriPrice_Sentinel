@@ -29,7 +29,7 @@ if %errorlevel% neq 0 (
 )
 
 echo  [1/3] Starting FastAPI backend on port 8000...
-start "Sentinel-API" cmd /k "call venv\Scripts\activate && python app.py"
+start "Sentinel-API" cmd /k "call venv\Scripts\activate && python -m app.app"
 
 echo  [2/3] Starting Next.js dashboard on port 3000...
 start "Sentinel-Dashboard" cmd /k "cd /d dashboard && npm run dev"

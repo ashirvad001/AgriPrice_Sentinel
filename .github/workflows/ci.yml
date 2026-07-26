@@ -48,14 +48,14 @@ jobs:
       - name: Run Database Migrations
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_mandi_db
-        run: alembic upgrade head
+        run: alembic -c infra/alembic.ini upgrade head
 
       - name: Run Tests
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_mandi_db
           REDIS_URL: redis://localhost:6379/0
           JWT_SECRET: test-secret
-        run: pytest test_feature_engineering.py test_stationarity.py test_routes_forecast.py -v --tb=short
+        run: PYTHONPATH="." pytest tests/test_feature_engineering.py tests/test_stationarity.py tests/test_routes_forecast.py -v --tb=short
 
       - name: Generate Coverage Report
         env:
@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker Image
-        run: docker build -t agriprice-sentinel:${{ github.sha }} .
+        run: docker build -f infra/Dockerfile -t agriprice-sentinel:${{ github.sha }} .
 
       - name: Login to GHCR
         if: github.ref == 'refs/heads/main'

@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 venv/
 evaluation_results/
+*.db
+*.log
+*.txt
+shap_outputs/
+kt_tuning/

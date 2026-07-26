@@ -35,7 +35,7 @@ if %errorlevel% neq 0 (
     echo  [WARN] Docker not found! Skipping Infrastructure auto-start.
 ) else (
     echo  [INFO] Docker detected. Starting Infrastructure [Postgres and Redis]...
-    docker-compose up -d postgres redis
+    docker-compose -f infra/docker-compose.yml up -d postgres redis
     if %errorlevel% neq 0 (
         echo  [WARN] Failed to start Docker services.
     )
@@ -46,11 +46,11 @@ echo  [STEP 1/3] Launching Backend Services...
 
 REM --- Backend (FastAPI) ---
 echo  [API] Starting FastAPI on port 8000...
-start "Sentinel-API" cmd /k "color 0E && call venv\Scripts\activate && python app.py"
+start "Sentinel-API" cmd /k "color 0E && call venv\Scripts\activate && python -m app.app"
 
 REM --- Scheduler (Main) ---
 echo  [SCHEDULER] Starting Task Scheduler...
-start "Sentinel-Scheduler" cmd /k "color 3F && call venv\Scripts\activate && python main.py"
+start "Sentinel-Scheduler" cmd /k "color 3F && call venv\Scripts\activate && python -m app.main"
 
 echo.
 echo  [STEP 2/3] Launching Frontend Dashboard...
