@@ -58,8 +58,9 @@ def _build_sync_url(async_url_str: str) -> str:
     return str(url.set(drivername=new_driver))
 
 
-logger = logging.getLogger("retrain")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
+from app.logger import get_logger
+
+logger = get_logger("retrain")
 
 _raw_db_url = os.getenv(
     "DATABASE_URL",
@@ -584,7 +585,7 @@ def retrain_single_crop(crop: str, mandi: str, session: Session, use_transfer: b
 #  CELERY TASK — RETRAIN ALL MODELS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@celery_app.task(name="tasks.retrain.retrain_all_models", bind=True, max_retries=1)
+@celery_app.task(name="app.tasks.retrain.retrain_all_models", bind=True, max_retries=1)
 def retrain_all_models(self, crops=None):
     """
     Celery task: retrain LSTM crop+mandi models.

@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextjs-dashboard
+  labels:
+    app: agriprice-dashboard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agriprice-dashboard
+  template:
+    metadata:
+      labels:
+        app: agriprice-dashboard
+    spec:
+      containers:
+      - name: dashboard
+        image: agriprice-dashboard:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NEXT_PUBLIC_API_URL
+          value: "http://api.agriprice.local"
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-service
+spec:
+  selector:
+    app: agriprice-dashboard
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+  type: ClusterIP

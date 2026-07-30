@@ -4,7 +4,6 @@ api/deps.py
 FastAPI dependency injection: DB session, Redis client, JWT-based current user.
 """
 
-import os
 import json
 from typing import AsyncGenerator, Optional
 from datetime import datetime, timedelta, timezone
@@ -16,20 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal, User
+from app.config import get_settings
+from app.logger import get_logger
 
-# ── Config ───────────────────────────────────────────────────────────────────
-JWT_SECRET = os.getenv("JWT_SECRET")
-if not JWT_SECRET:
-    raise RuntimeError(
-        "JWT_SECRET environment variable must be set. Generate one with: "
-        "python -c 'import secrets; print(secrets.token_hex(32))'"
-    )
-if len(JWT_SECRET) < 32:
-    raise RuntimeError(
-        "JWT_SECRET must be at least 32 characters long for security."
-    )
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))  # 24 hours
+logger = get_logger(__name__)
+settings = get_settings()
+
+# ── Config (validated by Pydantic on startup) ────────────────────────────────
+JWT_SECRET = settings.JWT_SECRET
+JWT_ALGORITHM = settings.JWT_ALGORITHM
+JWT_EXPIRE_MINUTES = settings.JWT_EXPIRE_MINUTES
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -48,15 +43,14 @@ _redis_client = None
 async def init_redis():
     """Initialise a global aioredis connection pool (call at app startup)."""
     global _redis_client
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     try:
         import redis.asyncio as aioredis
-        _redis_client = aioredis.from_url(redis_url, decode_responses=True)
+        _redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
         await _redis_client.ping()
-        print(f"✅  Redis connected → {redis_url}")
+        logger.info(f"Redis connected → {settings.REDIS_URL}")
     except Exception as e:
         _redis_client = None
-        print(f"⚠  Redis unavailable ({e}) — caching disabled")
+        logger.warning(f"Redis unavailable ({e}) — caching disabled")
 
 
 async def close_redis():

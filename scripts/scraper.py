@@ -17,12 +17,14 @@ from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_excep
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from app.database import AsyncSessionLocal, RawPrice, ScrapeError
+from app.config import get_settings
+from app.logger import get_logger
 from dotenv import load_dotenv
 
 load_dotenv()
 
-logger = logging.getLogger("scraper")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
+logger = get_logger("scraper")
+settings = get_settings()
 
 # ── 16 Crops ─────────────────────────────────────────────────────────────────
 CROPS = [
@@ -42,7 +44,7 @@ STATES = [
 
 # ── Agmarknet (data.gov.in) endpoint ────────────────────────────────────────
 AGMARKNET_API_URL = "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070"
-DATAGOV_API_KEY = os.getenv("DATAGOV_API_KEY", "")
+DATAGOV_API_KEY = settings.DATAGOV_API_KEY
 
 
 @retry(
@@ -72,7 +74,11 @@ async def fetch_api_data(session: aiohttp.ClientSession, crop: str, state: str) 
     async with session.get(
         AGMARKNET_API_URL,
         params=params,
-        timeout=aiohttp.ClientTimeout(total=15),
+        timeout=aiohttp.ClientTimeout(
+            total=15,
+            sock_connect=5,   # 5s to establish TCP connection
+            sock_read=10,     # 10s to read response body
+        ),
     ) as response:
         response.raise_for_status()
         payload = await response.json()

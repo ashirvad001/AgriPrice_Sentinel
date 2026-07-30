@@ -5,7 +5,7 @@ Pydantic v2 request / response models for the AgriPrice Sentinel API.
 """
 
 from __future__ import annotations
-from datetime import date, datetime, timezone
+from datetime import date as datetime_date, datetime, timezone
 from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -34,18 +34,18 @@ class UserLogin(BaseModel):
 
 class TokenResponse(BaseModel):
     """JWT token returned on successful login."""
-    access_token: str
-    token_type: str = "bearer"
+    access_token: str = Field(..., description="JWT access token string")
+    token_type: str = Field("bearer", description="Token type (bearer)")
     expires_in: int = Field(description="Token lifetime in seconds")
 
 
 class UserOut(BaseModel):
     """Public user profile."""
     model_config = ConfigDict(from_attributes=True)
-    id: int
-    phone: str
-    full_name: Optional[str] = None
-    created_at: datetime
+    id: int = Field(..., description="Unique user ID")
+    phone: str = Field(..., description="Registered mobile number")
+    full_name: Optional[str] = Field(None, description="Farmer's full name")
+    created_at: datetime = Field(..., description="Account creation timestamp")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -53,7 +53,7 @@ class UserOut(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 class ForecastDay(BaseModel):
     """Single day in the forecast horizon."""
-    date: date
+    date: datetime_date
     predicted_price: float = Field(description="Predicted modal price (₹/quintal)")
     lower_bound: float = Field(description="95% CI lower bound")
     upper_bound: float = Field(description="95% CI upper bound")
@@ -72,16 +72,16 @@ class ForecastResponse(BaseModel):
             "forecast": [],
         }
     })
-    crop: str
-    mandi: str
-    horizon_days: int
-    current_price: Optional[float] = None
+    crop: str = Field(..., description="Name of the crop")
+    mandi: str = Field(..., description="Name of the mandi (market)")
+    horizon_days: int = Field(..., description="Number of days forecasted")
+    current_price: Optional[float] = Field(None, description="Current modal price (₹/quintal)")
     msp: Optional[float] = Field(None, description="Current MSP for this crop (₹/quintal)")
-    avg_predicted_price: float = Field(description="Average predicted price over the horizon")
-    recommendation: str = Field(description="SELL or HOLD based on MSP comparison")
-    recommendation_reason: str
-    forecast: list[ForecastDay]
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    avg_predicted_price: float = Field(..., description="Average predicted price over the horizon")
+    recommendation: str = Field(..., description="SELL or HOLD based on MSP comparison")
+    recommendation_reason: str = Field(..., description="Explanation for the recommendation")
+    forecast: list[ForecastDay] = Field(..., description="Daily price predictions with confidence intervals")
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp of forecast generation")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -90,20 +90,20 @@ class ForecastResponse(BaseModel):
 class PriceRecord(BaseModel):
     """Single historical price entry."""
     model_config = ConfigDict(from_attributes=True)
-    date: date
-    modal_price: Optional[float] = None
-    min_price: Optional[float] = None
-    max_price: Optional[float] = None
-    mandi: Optional[str] = None
+    date: datetime_date = Field(..., description="Date of the record")
+    modal_price: Optional[float] = Field(None, description="Modal price (₹/quintal)")
+    min_price: Optional[float] = Field(None, description="Minimum price (₹/quintal)")
+    max_price: Optional[float] = Field(None, description="Maximum price (₹/quintal)")
+    mandi: Optional[str] = Field(None, description="Market name")
 
 
 class PriceHistoryResponse(BaseModel):
     """Historical price series response."""
-    crop: str
-    mandi: str
-    days_requested: int
-    total_records: int
-    prices: list[PriceRecord]
+    crop: str = Field(..., description="Crop name")
+    mandi: str = Field(..., description="Mandi name")
+    days_requested: int = Field(..., description="Number of days requested in history")
+    total_records: int = Field(..., description="Number of actual records returned")
+    prices: list[PriceRecord] = Field(..., description="Ordered list of daily price records")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -122,12 +122,12 @@ class AlertCreate(BaseModel):
 class AlertOut(BaseModel):
     """Subscription confirmation."""
     model_config = ConfigDict(from_attributes=True)
-    id: int
-    crop: str
-    mandi: str
-    threshold_price: float
-    is_active: bool
-    created_at: datetime
+    id: int = Field(..., description="Alert ID")
+    crop: str = Field(..., description="Monitored crop")
+    mandi: str = Field(..., description="Monitored mandi")
+    threshold_price: float = Field(..., description="Trigger price threshold")
+    is_active: bool = Field(..., description="Whether the alert is currently active")
+    created_at: datetime = Field(..., description="Subscription creation time")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -135,5 +135,5 @@ class AlertOut(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 class MessageResponse(BaseModel):
     """Generic message wrapper."""
-    message: str
-    detail: Optional[str] = None
+    message: str = Field(..., description="Status message")
+    detail: Optional[str] = Field(None, description="Optional detailed error or status info")

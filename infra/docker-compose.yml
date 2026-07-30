@@ -165,7 +165,26 @@ services:
     networks:
       - msp_net
 
-  # 11. MLflow Tracking Server
+  # 11. PgBouncer — lightweight connection pooler in front of Postgres
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: msp_pgbouncer
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-msp_forecast}
+      POOL_MODE: transaction
+      DEFAULT_POOL_SIZE: 40
+      MAX_CLIENT_CONN: 200
+      MAX_DB_CONNECTIONS: 40
+    ports:
+      - "6432:5432"
+    networks:
+      - msp_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 12. MLflow Tracking Server (backed by PostgreSQL, not SQLite)
   mlflow:
     image: mlflow/mlflow:latest
     container_name: msp_mlflow
@@ -176,11 +195,14 @@ services:
       - mlflow_data:/mlflow
     command: >-
       mlflow server
-      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --backend-store-uri postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-msp_forecast}
       --default-artifact-root /mlflow/artifacts
       --host 0.0.0.0
     networks:
       - msp_net
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 networks:
   msp_net:

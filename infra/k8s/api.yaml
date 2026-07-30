@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-backend
+  labels:
+    app: agriprice-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: agriprice-api
+  template:
+    metadata:
+      labels:
+        app: agriprice-api
+    spec:
+      containers:
+      - name: api
+        image: agriprice-api:latest
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: agriprice-config
+        - secretRef:
+            name: agriprice-secrets
+        resources:
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-service
+spec:
+  selector:
+    app: agriprice-api
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

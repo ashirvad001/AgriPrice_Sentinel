@@ -10,15 +10,17 @@ Features:
 - Price alert subscriptions
 - Prometheus metrics via /metrics
 - Async SQLAlchemy 2.0 + Pydantic v2
+- All routes under /api/v1 prefix
 """
 
-import os
 import uvicorn
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import get_settings
+from app.logger import get_logger
 from app.database import init_db
 from app.api.deps import init_redis, close_redis
 from app.api.auth import router as auth_router
@@ -28,6 +30,9 @@ from app.api.routes_alerts import router as alerts_router
 from app.api.routes_whatsapp import router as whatsapp_router
 from app.api.routes_shap import router as shap_router
 
+settings = get_settings()
+logger = get_logger(__name__)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  LIFESPAN — startup / shutdown hooks
@@ -35,16 +40,16 @@ from app.api.routes_shap import router as shap_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Async lifespan handler: init DB tables and Redis pool on startup."""
-    print("🚀  Starting AgriPrice Sentinel API…")
+    logger.info("Starting AgriPrice Sentinel API…")
     try:
         import alembic.config
         alembic.config.main(argv=["upgrade", "head"])
-        print("✅  Database migrations applied")
+        logger.info("Database migrations applied")
     except Exception as e:
-        print(f"⚠  Database migration skipped ({e})")
+        logger.warning(f"Database migration skipped ({e})")
         # Fallback for SQLite or when alembic is not configured
         await init_db()
-        print("✅  Database tables initialized via SQLAlchemy")
+        logger.info("Database tables initialized via SQLAlchemy")
 
     await init_redis()
 
@@ -52,7 +57,7 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     await close_redis()
-    print("👋  AgriPrice Sentinel API shut down")
+    logger.info("AgriPrice Sentinel API shut down")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -78,10 +83,9 @@ app = FastAPI(
 
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
-cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,14 +100,14 @@ try:
         should_ignore_untemplated=True,
         excluded_handlers=["/metrics", "/docs", "/redoc", "/openapi.json"],
     ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=True)
-    print("📊  Prometheus metrics enabled at /metrics")
+    logger.info("Prometheus metrics enabled at /metrics")
 except ImportError:
-    print("⚠  prometheus-fastapi-instrumentator not installed — /metrics disabled")
+    logger.warning("prometheus-fastapi-instrumentator not installed — /metrics disabled")
 
 
 from app.api.routes_ws import router as ws_router
 
-# ── Register routers ────────────────────────────────────────────────────────
+# ── Register routers (all under /api/v1 via their own prefix) ───────────────
 app.include_router(auth_router)
 app.include_router(forecast_router)
 app.include_router(prices_router)
@@ -127,7 +131,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "app:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
+        port=settings.PORT,
         reload=True,
         log_level="info",
     )

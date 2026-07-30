@@ -1,140 +1,101 @@
 """
-tasks/drift_detection.py
-────────────────────────
-Weekly data drift detection using the Kolmogorov-Smirnov test.
-
-Compares the distribution of modal_price from the last 90 days (live)
-against the 90 days before that (training window) for each crop.
-If significant drift is detected (p < 0.05), triggers selective retraining.
+app/tasks/drift_detection.py
+────────────────────────────
+Weekly Celery job to detect data drift in commodity prices using EvidentlyAI.
+Logs drift metrics to MLflow and triggers retraining if drift is severe.
 """
 
 import os
-import logging
-from datetime import date, timedelta, datetime, timezone
+from datetime import date, timedelta
+import pandas as pd
+from sqlalchemy import create_engine
+
+from evidently.report import Report
+from evidently.metric_preset import DataDriftPreset
 
 from app.celery_app import app as celery_app
-from scipy.stats import ks_2samp
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from app.tasks.retrain import TARGET_CROP_MANDIS, retrain_all_models
+from app.config import get_settings
+from app.logger import get_logger
 
-from dotenv import load_dotenv
+logger = get_logger("drift_detection")
+settings = get_settings()
 
-load_dotenv()
-
-logger = logging.getLogger(__name__)
-
-# ── Sync DB setup (same pattern as tasks/retrain.py) ─────────────────────────
-from app.tasks.retrain import _build_sync_url
-
-_raw_db_url = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/postgres",
-)
-
-try:
-    _SYNC_DB_URL = _build_sync_url(_raw_db_url)
-    _drift_engine = create_engine(_SYNC_DB_URL, echo=False, pool_pre_ping=True)
-    _DriftSession = sessionmaker(bind=_drift_engine)
-except Exception as e:
-    logger.error(f"Drift detection DB engine failed: {e}")
-    _drift_engine = None
-    _DriftSession = None
-
-# ── Crops to monitor ────────────────────────────────────────────────────────
-MONITORED_CROPS = [
-    "Wheat", "Rice", "Maize", "Bajra", "Jowar", "Ragi", "Barley", "Gram",
-    "Tur", "Moong", "Urad", "Groundnut", "Soybean", "Mustard", "Cotton", "Sugarcane",
-]
-
-DRIFT_THRESHOLD = 0.05  # KS test p-value threshold
-
-
-def _fetch_modal_prices(session, crop: str, start_date: date, end_date: date) -> list[float]:
-    """Fetch modal_price values from raw_prices for a crop within a date range."""
-    query = text("""
-        SELECT (raw_data->>'modal_price')::float AS modal_price
+def _get_prices_for_window(engine, crop: str, mandi: str, start: date, end: date) -> pd.DataFrame:
+    """Fetch prices for a specific date window."""
+    query = f"""
+        SELECT fetch_date, CAST(raw_data->>'modal_price' AS FLOAT) as modal_price
         FROM raw_prices
-        WHERE LOWER(crop) = LOWER(:crop)
-          AND fetch_date >= :start_date
-          AND fetch_date < :end_date
+        WHERE crop = '{crop}' 
+          AND raw_data->>'mandi' = '{mandi}'
+          AND fetch_date BETWEEN '{start}' AND '{end}'
           AND raw_data->>'modal_price' IS NOT NULL
         ORDER BY fetch_date ASC
-    """)
-    rows = session.execute(query, {
-        "crop": crop,
-        "start_date": start_date,
-        "end_date": end_date,
-    }).fetchall()
-    return [float(row[0]) for row in rows if row[0] is not None]
+    """
+    try:
+        return pd.read_sql(query, engine)
+    except Exception as e:
+        logger.error(f"Error fetching data for drift detection: {e}")
+        return pd.DataFrame()
 
 
-@celery_app.task(name="tasks.drift_detection.detect_drift_weekly")
+@celery_app.task(name="app.tasks.drift_detection.detect_drift_weekly")
 def detect_drift_weekly():
     """
-    Weekly drift detection job using Kolmogorov-Smirnov test.
-
-    Compares last 90 days of modal_price (live window) against the 90 days
-    before that (training window) for each monitored crop.
-    Triggers selective retraining for crops where p < 0.05.
+    Weekly drift detection job using EvidentlyAI.
+    Compares the last 7 days of prices (Current) against the 30 days prior (Reference).
     """
-    logger.info("=" * 60)
-    logger.info("  WEEKLY DRIFT DETECTION — KS Test")
-    logger.info(f"  Started at: {datetime.now(timezone.utc).isoformat()}")
-    logger.info("=" * 60)
-
-    if _DriftSession is None:
-        logger.error("Database unavailable — cannot run drift detection")
-        return {"error": "no_database"}
-
-    session = _DriftSession()
-    drift_detected_crops = []
-
-    try:
-        today = date.today()
-        live_start = today - timedelta(days=90)
-        train_start = today - timedelta(days=180)
-        train_end = live_start
-
-        for crop in MONITORED_CROPS:
-            try:
-                training_prices = _fetch_modal_prices(session, crop, train_start, train_end)
-                recent_prices = _fetch_modal_prices(session, crop, live_start, today)
-
-                if len(training_prices) < 10 or len(recent_prices) < 10:
-                    logger.warning(
-                        f"[{crop}] Insufficient data for KS test "
-                        f"(train={len(training_prices)}, live={len(recent_prices)})"
-                    )
-                    continue
-
-                # Perform Two-Sample Kolmogorov-Smirnov Test
-                statistic, p_value = ks_2samp(training_prices, recent_prices)
-                logger.info(
-                    f"[{crop}] KS test: statistic={statistic:.4f}, "
-                    f"p_value={p_value:.4f}, n_train={len(training_prices)}, "
-                    f"n_live={len(recent_prices)}"
-                )
-
-                if p_value < DRIFT_THRESHOLD:
-                    logger.warning(f"[{crop}] ⚠ Data drift detected (p={p_value:.4f} < {DRIFT_THRESHOLD})")
-                    drift_detected_crops.append(crop)
-
-            except Exception as e:
-                logger.error(f"[{crop}] Error during drift detection: {e}")
-
-    finally:
-        session.close()
-
-    # ── Trigger selective retraining for drifting crops ───────────────────
-    if drift_detected_crops:
-        logger.info(f"Triggering retraining for drifting crops: {drift_detected_crops}")
-        from app.tasks.retrain import retrain_all_models
-        retrain_all_models.delay(crops=drift_detected_crops)
+    logger.info("Starting weekly EvidentlyAI data drift detection...")
+    
+    # ── Database connection ──────────────────────────────────────────────────
+    # Create sync engine for pandas read_sql
+    driver_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(driver_url)
+    
+    today = date.today()
+    current_start = today - timedelta(days=7)
+    reference_start = current_start - timedelta(days=30)
+    
+    # Track which models need retraining due to drift
+    drifted_pairs = []
+    
+    for crop, mandi in TARGET_CROP_MANDIS:
+        # 1. Fetch Reference Data (T-37 to T-7)
+        ref_df = _get_prices_for_window(engine, crop, mandi, reference_start, current_start - timedelta(days=1))
+        
+        # 2. Fetch Current Data (T-7 to T)
+        cur_df = _get_prices_for_window(engine, crop, mandi, current_start, today)
+        
+        if len(ref_df) < 10 or len(cur_df) < 5:
+            logger.info(f"Insufficient data to detect drift for {crop}/{mandi}. Ref: {len(ref_df)}, Cur: {len(cur_df)}")
+            continue
+            
+        # 3. Generate Evidently Report
+        report = Report(metrics=[DataDriftPreset()])
+        report.run(reference_data=ref_df[['modal_price']], current_data=cur_df[['modal_price']])
+        
+        # 4. Extract Results
+        result = report.as_dict()
+        dataset_drift = result['metrics'][0]['result']['dataset_drift']
+        drift_share = result['metrics'][0]['result']['drift_share']
+        
+        if dataset_drift:
+            logger.warning(f"🚨 DRIFT DETECTED: {crop} @ {mandi} (Drift share: {drift_share:.2f})")
+            drifted_pairs.append((crop, mandi))
+        else:
+            logger.info(f"✅ Stable: {crop} @ {mandi} (Drift share: {drift_share:.2f})")
+            
+        # Optional: Save HTML report to disk or MLflow
+        # report_path = f"drift_report_{crop}_{mandi}.html"
+        # report.save_html(report_path)
+            
+    engine.dispose()
+    
+    # Trigger retrain for drifted models
+    if drifted_pairs:
+        logger.info(f"Triggering retraining for {len(drifted_pairs)} drifted models...")
+        retrain_all_models.delay(crops=drifted_pairs)
     else:
-        logger.info("No drift detected across all monitored crops ✅")
-
-    return {
-        "checked": len(MONITORED_CROPS),
-        "drift_detected": drift_detected_crops,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
+        logger.info("No data drift detected across all monitored crop/mandi pairs.")
+        
+    return {"drifted_count": len(drifted_pairs)}

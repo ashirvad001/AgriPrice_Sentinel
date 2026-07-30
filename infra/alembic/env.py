@@ -10,10 +10,12 @@ from alembic import context
 
 # Insert project root to module path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from app.database import Base, DATABASE_URL
+from app.database import Base
+from app.config import get_settings
 
 # this is the Alembic Config object
 config = context.config
+settings = get_settings()
 
 # Interpret the config file for Python logging
 if config.config_file_name is not None:
@@ -21,7 +23,7 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 
 def run_migrations_offline() -> None:

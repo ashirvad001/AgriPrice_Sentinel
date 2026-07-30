@@ -26,7 +26,7 @@ app = Celery(
     "agriprice_sentinel",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks.retrain", "tasks.alerts", "tasks.drift_detection"],
+    include=["app.tasks.retrain", "app.tasks.alerts", "app.tasks.drift_detection"],
 )
 
 # ── Celery configuration ────────────────────────────────────────────────────
@@ -57,18 +57,23 @@ app.conf.task_default_queue = "default"
 # Monday 3:00 AM IST = Sunday 21:30 UTC
 app.conf.beat_schedule = {
     "weekly-lstm-retrain": {
-        "task": "tasks.retrain.retrain_all_models",
+        "task": "app.tasks.retrain.retrain_all_models",
         "schedule": crontab(hour=2, minute=0, day_of_week="sunday"),
         "options": {"queue": "retrain"},
     },
     "daily-price-alerts": {
-        "task": "tasks.alerts.send_daily_alerts",
+        "task": "app.tasks.alerts.send_daily_alerts",
         "schedule": crontab(hour=6, minute=0),
         "options": {"queue": "alerts"},
     },
     "weekly-drift-detection": {
-        "task": "tasks.drift_detection.detect_drift_weekly",
+        "task": "app.tasks.drift_detection.detect_drift_weekly",
         "schedule": crontab(hour=3, minute=0, day_of_week="monday"),
+        "options": {"queue": "default"},
+    },
+    "nightly-forecast-precompute": {
+        "task": "app.tasks.precompute.precompute_forecasts",
+        "schedule": crontab(hour=1, minute=0),
         "options": {"queue": "default"},
     },
 }
