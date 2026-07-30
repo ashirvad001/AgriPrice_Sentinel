@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, ValidationInfo
 
 
 class Settings(BaseSettings):
@@ -39,6 +39,27 @@ class Settings(BaseSettings):
     )
     JWT_ALGORITHM: str = Field(default="HS256")
     JWT_EXPIRE_MINUTES: int = Field(default=1440, description="Token expiry in minutes (default 24h)")
+
+    @field_validator("JWT_SECRET", mode="before")
+    @classmethod
+    def _validate_jwt_secret(cls, v: object) -> str:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(
+                "FATAL: JWT_SECRET environment variable is not set. "
+                "The application CANNOT start without it.\n"
+                "  → Generate one with: openssl rand -hex 32\n"
+                "  → Then set it in your .env file or environment."
+            )
+        if not isinstance(v, str):
+            raise ValueError("JWT_SECRET must be a string.")
+        v = v.strip()
+        if len(v) < 32:
+            raise ValueError(
+                f"FATAL: JWT_SECRET is too short ({len(v)} chars). "
+                "A minimum of 32 characters is required.\n"
+                "  → Generate a secure key with: openssl rand -hex 32"
+            )
+        return v
 
     # ── External API Keys ───────────────────────────────────────────────────
     DATAGOV_API_KEY: str = Field(default="", description="data.gov.in API key for Agmarknet")

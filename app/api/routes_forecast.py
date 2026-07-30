@@ -49,11 +49,8 @@ async def get_forecast(
     service = ForecastService(db)
     response, source = await service.get_forecast(crop, mandi, horizon)
 
-    # If the forecast came from the statistical baseline or cache, 
-    # we return a header indicating the source.
-    if source != "model":
-        resp = JSONResponse(content=response.model_dump(mode="json"))
-        resp.headers["X-Forecast-Source"] = source
-        return resp
-
-    return response
+    # Always include X-Forecast-Source so monitoring tools can track
+    # how many responses come from the model vs. statistical baseline.
+    resp = JSONResponse(content=response.model_dump(mode="json"))
+    resp.headers["X-Forecast-Source"] = source
+    return resp

@@ -80,6 +80,10 @@ class ForecastResponse(BaseModel):
     avg_predicted_price: float = Field(..., description="Average predicted price over the horizon")
     recommendation: str = Field(..., description="SELL or HOLD based on MSP comparison")
     recommendation_reason: str = Field(..., description="Explanation for the recommendation")
+    forecast_source: str = Field(
+        ...,
+        description="Source of the forecast: 'model', 'statistical-baseline', or 'cache'",
+    )
     forecast: list[ForecastDay] = Field(..., description="Daily price predictions with confidence intervals")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp of forecast generation")
 

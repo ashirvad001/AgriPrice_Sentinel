@@ -3,6 +3,11 @@ app/services/forecast_service.py
 ────────────────────────────────
 Business logic layer for generating crop price forecasts.
 Orchestrates data fetching, caching, ML inference, and statistical fallback.
+
+Fallback policy (Option B — degraded + transparent):
+  • Model available    → real MC Dropout inference, source="model"
+  • Model unavailable  → statistical baseline if data exists, source="statistical-baseline"
+  • No data at all     → HTTP 503 (never returns fake flat values)
 """
 
 import numpy as np
@@ -10,6 +15,7 @@ import pandas as pd
 from datetime import date, timedelta
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import HTTPException, status
 
 import mlflow.keras
 
@@ -44,23 +50,35 @@ class ForecastService:
 
     @classmethod
     def load_crop_model(cls, crop: str, mandi: str):
-        """Tries MLflow model registry first, then falls back to local file."""
+        """Tries MLflow model registry first, then falls back to local file.
+
+        Returns the loaded Keras model or None.  All failures are logged at
+        WARNING level so operators can see *why* inference fell back.
+        """
         import mlflow
         mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
-        
+
         try:
             model_uri = f"models:/CropPrice_{crop}_{mandi.replace(' ', '_')}/Production"
-            return mlflow.keras.load_model(model_uri)
-        except Exception:
-            logger.info(f"MLflow load failed for {crop}/{mandi}, trying local fallback…")
+            model = mlflow.keras.load_model(model_uri)
+            logger.info(f"Loaded model from MLflow registry for {crop}/{mandi}")
+            return model
+        except Exception as exc:
+            logger.warning(
+                f"MLflow model load failed for {crop}/{mandi}: {type(exc).__name__}: {exc}"
+            )
 
         try:
             import tensorflow as tf
             local_path = SAVED_MODELS_DIR / f"{cls._model_stem(crop, mandi)}_model.keras"
             if local_path.exists():
-                return tf.keras.models.load_model(str(local_path), compile=False)
+                model = tf.keras.models.load_model(str(local_path), compile=False)
+                logger.info(f"Loaded model from local file: {local_path}")
+                return model
+            else:
+                logger.warning(f"Local model file not found: {local_path}")
         except Exception as exc:
-            logger.warning(f"Local model load failed: {exc}")
+            logger.warning(f"Local model load failed: {type(exc).__name__}: {exc}")
 
         return None
 
@@ -208,18 +226,34 @@ class ForecastService:
             if result is not None:
                 means, lowers, uppers = result
                 logger.info(f"Forecast via trained model for {crop}/{mandi}")
+            else:
+                logger.warning(
+                    f"Model loaded but inference failed for {crop}/{mandi} — "
+                    "falling back to statistical baseline"
+                )
 
         if means is None:
             forecast_source = "statistical-baseline"
             if records:
                 means, lowers, uppers = self._statistical_baseline(records, horizon)
-                logger.info(f"Forecast via statistical baseline for {crop}/{mandi}")
+                logger.warning(
+                    f"No ML model available for {crop}/{mandi}. "
+                    f"Returning statistical baseline forecast (source='{forecast_source}')."
+                )
             else:
-                means = [base_price] * horizon
-                spread = base_price * 0.05
-                lowers = [base_price - spread] * horizon
-                uppers = [base_price + spread] * horizon
-                logger.info(f"Forecast via flat fallback for {crop}/{mandi}")
+                # ── NO fake data: fail loudly ────────────────────────────
+                logger.error(
+                    f"Cannot produce forecast for {crop}/{mandi}: "
+                    "no trained model AND no historical price data available."
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        f"Forecast unavailable for {crop}/{mandi}: "
+                        "no trained model and no historical data. "
+                        "Please ensure a model is trained or price data is ingested."
+                    ),
+                )
 
         forecast_days = [
             ForecastDay(
@@ -254,6 +288,7 @@ class ForecastService:
             avg_predicted_price=avg_price,
             recommendation=recommendation,
             recommendation_reason=reason,
+            forecast_source=forecast_source,
             forecast=forecast_days,
         )
 
