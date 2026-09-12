@@ -1,7 +1,7 @@
 <div align="center">
-  <h1>🌾 AgriPrice Sentinel</h1>
+  <h1>AgriPrice Sentinel</h1>
   <p><strong>AI-Powered Commodity Price Forecasting & Alert System for Indian Mandis</strong></p>
-  
+
   ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
   ![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?logo=fastapi&logoColor=white)
   ![TensorFlow](https://img.shields.io/badge/TensorFlow-2.15-FF6F00?logo=tensorflow&logoColor=white)
@@ -12,7 +12,7 @@
 
 ---
 
-## 📖 Overview
+## Overview
 
 **AgriPrice Sentinel** is a comprehensive predictive analytics platform designed to forecast agricultural commodity prices across Indian wholesale markets (Mandis). By combining historical price tracking, weather data, and advanced deep learning (BiLSTM + Bahdanau Attention), it empowers farmers and traders to make data-driven selling decisions up to 90 days in advance.
 
@@ -20,17 +20,17 @@ The platform provides a Next.js dashboard for visualizing trends, SHAP-based mod
 
 ---
 
-## ✨ Key Features
+## Key Features
 
-- 🔮 **Advanced Forecasting Engine**: Multi-horizon predictions (30, 60, 90 days) using a state-of-the-art **BiLSTM network with Bahdanau Attention** and Monte Carlo Dropout for 95% confidence intervals.
-- 📱 **WhatsApp Bot & Proactive Alerts**: automated daily price alerts and threshold notifications sent directly to users' WhatsApp via Twilio.
-- 🧠 **Explainable AI (XAI)**: SHAP (SHapley Additive exPlanations) values translate complex machine learning features into farmer-friendly insights (e.g., "Price dropped due to heavy rainfall 2 weeks ago").
-- 🔄 **Automated MLOps Pipeline**: Celery beat workers automatically retrain models weekly, replacing the production model only if the new RMSE shows improvement.
-- ⚡ **High-Performance API**: Asynchronous FastAPI backend backed by PostgreSQL (asyncpg) and Redis caching for millisecond-latency responses.
+- **Advanced Forecasting Engine**: Multi-horizon predictions (30, 60, 90 days) using a state-of-the-art **BiLSTM network with Bahdanau Attention** and Monte Carlo Dropout for 95% confidence intervals.
+- **WhatsApp Bot & Proactive Alerts**: automated daily price alerts and threshold notifications sent directly to users' WhatsApp via Twilio.
+- **Explainable AI (XAI)**: SHAP (SHapley Additive exPlanations) values translate complex machine learning features into farmer-friendly insights (e.g., "Price dropped due to heavy rainfall 2 weeks ago").
+- **Automated MLOps Pipeline**: Celery beat workers automatically retrain models weekly, replacing the production model only if the new RMSE shows improvement.
+- **High-Performance API**: Asynchronous FastAPI backend backed by PostgreSQL (asyncpg) and Redis caching for millisecond-latency responses.
 
 ---
 
-## 🏛️ System Architecture
+## System Architecture
 
 ### Tech Stack
 *   **Backend:** Python, FastAPI, SQLAlchemy 2.0 (Async), Redis, Celery
@@ -48,9 +48,9 @@ The feature engineering pipeline transforms raw price and weather data into a 53
 
 ---
 
-## 📊 Model Evaluation Suite
+## Model Evaluation Suite
 
-The project includes a comprehensive evaluation script (`model_evaluation.py`) that benchmarks 5 algorithms across **16 crops × 3 mandis × 3 horizons (30/60/90 days)** for a total of 144 experiment runs.
+The project includes a comprehensive evaluation script (`model_evaluation.py`) that benchmarks 5 algorithms across **16 crops x 3 mandis x 3 horizons (30/60/90 days)** for a total of 144 experiment runs.
 
 **Compared Models:**
 1. ARIMA(5,1,2)
@@ -63,7 +63,7 @@ The project includes a comprehensive evaluation script (`model_evaluation.py`) t
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 *   Python 3.11+
@@ -89,20 +89,20 @@ pip install -r requirements.txt
 # Create .env file from the example template
 cp .env.example .env
 
-# Generate a secure JWT secret (REQUIRED — app will not start without it)
+# Generate a secure JWT secret (REQUIRED - app will not start without it)
 python -c "import secrets; print(secrets.token_hex(32))"
-# Paste the output into .env as JWT_SECRET=<generated_value>
+# Paste the output into .env as SECRET_KEY=<generated_value>
 ```
 
 **Required `.env` Variables** (see `.env.example` for full reference):
 ```env
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/mandi_db
 REDIS_URL=redis://localhost:6379/0
-JWT_SECRET=<your-64-char-hex-secret>   # python -c 'import secrets; print(secrets.token_hex(32))'
+SECRET_KEY=<generate with: openssl rand -hex 32>
 JWT_EXPIRE_MINUTES=1440
 DATAGOV_API_KEY=<your-data-gov-in-key>
-TWILIO_ACCOUNT_SID=AC...               # optional — for WhatsApp alerts
-TWILIO_AUTH_TOKEN=...                   # optional — for WhatsApp alerts
+TWILIO_ACCOUNT_SID=AC...               # optional - for WhatsApp alerts
+TWILIO_AUTH_TOKEN=...                  # optional - for WhatsApp alerts
 ```
 
 ### 2. Database Initialization & Running the API
@@ -135,7 +135,7 @@ npm run dev
 
 ---
 
-## 🧪 Model Training & Evaluation
+## Model Training & Evaluation
 To run the automated model evaluation suite and generate the LaTeX tables, heatmaps, and improvement charts:
 ```bash
 python model_evaluation.py --crops Wheat Rice --horizons 30  # Quick run
@@ -146,8 +146,8 @@ python model_evaluation.py
 
 ---
 
-## 🤝 Contributing
+## Contributing
 Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
 
-## 📄 License
+## License
 This project is licensed under the MIT License - see the LICENSE file for details.

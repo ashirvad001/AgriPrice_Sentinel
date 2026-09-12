@@ -56,7 +56,7 @@ echo.
 echo  [STEP 2/3] Launching Frontend Dashboard...
 
 REM --- Frontend (Next.js) ---
-echo  [DASHBOARD] Starting Next.js on port 3000...
+echo  [DASHBOARD] Starting Next.js on port 3001...
 start "Sentinel-Dashboard" cmd /k "color 09 && cd /d dashboard && npm run dev"
 
 echo.
@@ -68,7 +68,7 @@ echo.
 echo  ==============================================================
 echo   SERVICES SUMMARY:
 echo  --------------------------------------------------------------
-echo    - Dashboard:     http://localhost:3000
+echo    - Dashboard:     http://localhost:3001
 echo    - Backend API:   http://localhost:8000
 echo    - API Docs:      http://localhost:8000/docs
 echo  ==============================================================
@@ -76,7 +76,7 @@ echo.
 
 REM --- Launch Browser ---
 echo  Opening dashboard in your default browser...
-start http://localhost:3000
+start http://localhost:3001
 
 echo.
 echo  [SUCCESS] All services are launching in separate windows.

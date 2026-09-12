@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc
 
 from app.database import RawPrice
-from app.api.schemas import PriceHistoryResponse, PriceRecord
+from app.api.schemas import CropPath, MandiPath, PriceHistoryResponse, PriceRecord
 from app.api.deps import get_db
 from app.logger import get_logger
 from app.utils.lttb import downsample
@@ -31,8 +31,8 @@ router = APIRouter(prefix="/api/v1", tags=["Historical Prices"])
     ),
 )
 async def get_prices(
-    crop: str,
-    mandi: str,
+    crop: CropPath,
+    mandi: MandiPath,
     days: int = Query(365, ge=1, le=3650, description="Number of days of history to return"),
     db: AsyncSession = Depends(get_db),
 ):

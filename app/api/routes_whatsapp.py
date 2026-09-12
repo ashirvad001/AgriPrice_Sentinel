@@ -39,8 +39,8 @@ def _validate_twilio_signature(request: Request, form_data: dict) -> bool:
 @router.post("/webhook")
 async def twilio_webhook(
     request: Request,
-    Body: str = Form(""),
-    From: str = Form(""),
+    Body: str = Form("", max_length=1600),
+    From: str = Form("", max_length=30, pattern=r"^(whatsapp:\+?\d{10,15})?$"),
     db: AsyncSession = Depends(get_db),
 ):
     """

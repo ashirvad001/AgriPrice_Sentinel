@@ -1,92 +1,155 @@
-import pytest
-from unittest.mock import patch, MagicMock
-from datetime import date
-from fastapi.responses import JSONResponse
-import json
-import pandas as pd
+import importlib
+import os
+import sys
+from datetime import date, timedelta
+from unittest.mock import patch
+
 import numpy as np
+import pandas as pd
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from app.api.routes_forecast import get_forecast
-from app.api.schemas import ForecastResponse
 
-pytestmark = pytest.mark.asyncio
+_BASE_ENV = {
+    "SECRET_KEY": "a" * 64,
+    "DATABASE_URL": "sqlite+aiosqlite:///./test.db",
+}
 
-@pytest.fixture
-def mock_db():
-    return MagicMock()
+_FORECAST_MODULES = [
+    "app.api.routes_forecast",
+    "app.api.deps",
+    "app.api.schemas",
+    "app.database",
+    "app.logger",
+    "app.config",
+    "app.services.forecast_service",
+    "app.repositories.forecast_repository",
+]
 
-@pytest.fixture
-def sample_records():
-    # Provide enough records to avoid "Not enough rows" baseline shortcut
-    today = date.today()
-    return [{"date": today, "modal_price": 2500.0, "msp": 2000.0}] * 100
 
-@patch("app.api.routes_forecast._fetch_price_rows")
-@patch("app.api.routes_forecast.load_crop_model")
-@patch("app.api.routes_forecast.cache_get")
-@patch("app.api.routes_forecast.cache_set")
-async def test_fallback_path(mock_cache_set, mock_cache_get, mock_load, mock_fetch, mock_db, sample_records):
-    """
-    Test that when no model is available, the endpoint returns a valid fallback forecast
-    via the statistical baseline, returned as a JSONResponse.
-    """
-    mock_cache_get.return_value = None
-    mock_load.return_value = None
-    mock_fetch.return_value = sample_records
-    
-    response = await get_forecast("wheat", "New Delhi", horizon=30, db=mock_db)
-    
-    assert isinstance(response, JSONResponse)
-    assert response.headers["X-Forecast-Source"] == "statistical-baseline"
-    
-    data = json.loads(response.body.decode())
-    assert "forecast" in data
-    assert len(data["forecast"]) == 30
-    assert data["crop"] == "wheat"
-    assert data["mandi"] == "New Delhi"
-    assert "recommendation" in data
+class DummyModel:
+    input_shape = (None, 60, 53)
+    output_shape = (None, 30)
 
-@patch("app.api.routes_forecast._fetch_price_rows")
-@patch("app.api.routes_forecast.load_crop_model")
-@patch("app.api.routes_forecast._load_scaler")
-@patch("app.forecast_model.get_mc_dropout_predictions")
-@patch("app.feature_engineering.engineer_features")
-@patch("app.api.routes_forecast.cache_get")
-@patch("app.api.routes_forecast.cache_set")
-async def test_inference_path(
-    mock_cache_set, mock_cache_get, mock_engineer, mock_mc_dropout,
-    mock_scaler, mock_load, mock_fetch, mock_db, sample_records
-):
-    """
-    Test that when a model is available, the endpoint correctly delegates to it,
-    calling get_mc_dropout_predictions and returning the true model values.
-    """
-    mock_cache_get.return_value = None
-    
-    # Mock the Keras model
-    mock_keras_model = MagicMock()
-    mock_keras_model.input_shape = (None, 60, 53)
-    mock_load.return_value = mock_keras_model
-    
-    mock_scaler.return_value = MagicMock()
-    mock_fetch.return_value = sample_records
-    
-    # Mock feature engineering so it returns a non-empty DF >= seq_len (60)
-    mock_engineer.return_value = pd.DataFrame(np.random.randn(70, 53))
-    
-    # Mock MC Dropout to return deterministic arrays
-    # get_mc_dropout_predictions returns (mean_pred, lower_bound, upper_bound)
-    # Each is a 2D array: (batch_size=1, output_steps)
-    means = np.full((1, 30), 3200.0)
-    lowers = np.full((1, 30), 3100.0)
-    uppers = np.full((1, 30), 3300.0)
-    mock_mc_dropout.return_value = (means, lowers, uppers)
-    
-    response = await get_forecast("wheat", "New Delhi", horizon=30, db=mock_db)
-    
-    # When source is "model", it returns the ForecastResponse directly
-    assert isinstance(response, ForecastResponse)
-    assert len(response.forecast) == 30
-    assert response.forecast[0].predicted_price == 3200.0
-    assert response.forecast[0].lower_bound == 3100.0
-    assert response.forecast[0].upper_bound == 3300.0
+
+def _clear_forecast_modules() -> None:
+    for module_name in _FORECAST_MODULES:
+        sys.modules.pop(module_name, None)
+
+
+def _build_forecast_test_app() -> FastAPI:
+    with patch.dict(os.environ, _BASE_ENV, clear=False):
+        _clear_forecast_modules()
+        deps = importlib.import_module("app.api.deps")
+        routes = importlib.import_module("app.api.routes_forecast")
+
+        app = FastAPI()
+        app.include_router(routes.router)
+
+        async def _override_db():
+            yield object()
+
+        app.dependency_overrides[deps.get_db] = _override_db
+        return app
+
+
+def _make_records(base_price: float) -> list[dict]:
+    start = date(2026, 1, 1)
+    records = []
+    for offset in range(120):
+        price = base_price + offset * 3
+        records.append(
+            {
+                "date": start + timedelta(days=offset),
+                "modal_price": price,
+                "min_price": price - 20,
+                "max_price": price + 20,
+                "arrivals_tonnes": 100 + offset,
+                "rainfall_mm": float(offset % 7),
+                "max_temp": 30.0 + (offset % 5),
+                "min_temp": 18.0 + (offset % 3),
+                "freight_index": 100.0 + offset * 0.1,
+                "futures_price": price + 10,
+                "msp": 2275.0,
+            }
+        )
+    return records
+
+
+async def _fake_get_cached_forecast(self, cache_key: str):
+    return None
+
+
+async def _fake_set_cached_forecast(self, cache_key: str, data: dict, ttl: int = 3600):
+    return None
+
+
+async def _fake_fetch_historical_prices(self, crop: str, mandi: str, days: int = 365):
+    key = (crop.lower(), mandi.lower())
+    if key == ("wheat", "azadpur"):
+        return _make_records(1800.0)
+    if key == ("rice", "karnal"):
+        return _make_records(2600.0)
+    raise AssertionError(f"Unexpected crop/mandi pair: {crop}/{mandi}")
+
+
+def _fake_engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    last_price = float(df["modal_price"].iloc[-1])
+    rows = 70
+    base_column = np.linspace(last_price, last_price + rows - 1, rows, dtype=np.float32).reshape(-1, 1)
+    feature_matrix = np.repeat(base_column, 53, axis=1)
+    return pd.DataFrame(feature_matrix)
+
+
+def test_forecast_endpoint_invokes_real_inference_and_varies_by_input():
+    app = _build_forecast_test_app()
+
+    def _inference_side_effect(model, X, n_iter=100, confidence_level=0.95):
+        base = float(X.mean())
+        steps = np.arange(30, dtype=np.float32)
+        mean = (base + steps).reshape(1, 30)
+        lower = mean - 2.5
+        upper = mean + 2.5
+        return mean, lower, upper
+
+    with patch(
+        "app.repositories.forecast_repository.ForecastRepository.get_cached_forecast",
+        _fake_get_cached_forecast,
+    ), patch(
+        "app.repositories.forecast_repository.ForecastRepository.set_cached_forecast",
+        _fake_set_cached_forecast,
+    ), patch(
+        "app.repositories.forecast_repository.ForecastRepository.fetch_historical_prices",
+        _fake_fetch_historical_prices,
+    ), patch(
+        "app.services.forecast_service.ForecastService.load_crop_model",
+        return_value=DummyModel(),
+    ), patch(
+        "app.services.forecast_service.ForecastService.load_scaler",
+        return_value=None,
+    ), patch(
+        "app.feature_engineering.engineer_features",
+        side_effect=_fake_engineer_features,
+    ), patch(
+        "app.forecast_model.get_mc_dropout_predictions",
+        side_effect=_inference_side_effect,
+    ) as mock_inference:
+        with TestClient(app) as client:
+            wheat_response = client.get("/api/v1/forecast/wheat/Azadpur?horizon=30")
+            rice_response = client.get("/api/v1/forecast/rice/Karnal?horizon=30")
+
+    assert wheat_response.status_code == 200
+    assert rice_response.status_code == 200
+    assert wheat_response.headers["X-Forecast-Source"] == "model"
+    assert rice_response.headers["X-Forecast-Source"] == "model"
+    assert mock_inference.call_count == 2
+
+    wheat_payload = wheat_response.json()
+    rice_payload = rice_response.json()
+
+    assert wheat_payload["forecast_source"] == "model"
+    assert rice_payload["forecast_source"] == "model"
+    assert wheat_payload["avg_predicted_price"] != rice_payload["avg_predicted_price"]
+    assert wheat_payload["forecast"][0]["predicted_price"] != rice_payload["forecast"][0]["predicted_price"]
+    assert wheat_payload["forecast"][0]["predicted_price"] != wheat_payload["forecast"][-1]["predicted_price"]
+    assert rice_payload["forecast"][0]["predicted_price"] != rice_payload["forecast"][-1]["predicted_price"]

@@ -1,6 +1,6 @@
 """
 api/deps.py
-───────────
+-----------
 FastAPI dependency injection: DB session, Redis client, JWT-based current user.
 """
 
@@ -21,22 +21,20 @@ from app.logger import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-# ── Config (validated by Pydantic on startup) ────────────────────────────────
-JWT_SECRET = settings.JWT_SECRET
+# Config (validated by Pydantic on startup)
+SECRET_KEY = settings.SECRET_KEY
 JWT_ALGORITHM = settings.JWT_ALGORITHM
 JWT_EXPIRE_MINUTES = settings.JWT_EXPIRE_MINUTES
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
-# ── Database session ─────────────────────────────────────────────────────────
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Yield an async SQLAlchemy session, auto-closed after request."""
     async with AsyncSessionLocal() as session:
         yield session
 
 
-# ── Redis client (optional — graceful fallback) ─────────────────────────────
 _redis_client = None
 
 
@@ -47,10 +45,10 @@ async def init_redis():
         import redis.asyncio as aioredis
         _redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
         await _redis_client.ping()
-        logger.info(f"Redis connected → {settings.REDIS_URL}")
+        logger.info(f"Redis connected -> {settings.REDIS_URL}")
     except Exception as e:
         _redis_client = None
-        logger.warning(f"Redis unavailable ({e}) — caching disabled")
+        logger.warning(f"Redis unavailable ({e}) -> caching disabled")
 
 
 async def close_redis():
@@ -66,7 +64,6 @@ def get_redis():
     return _redis_client
 
 
-# ── Redis cache helpers ──────────────────────────────────────────────────────
 async def cache_get(key: str) -> Optional[dict]:
     """Read a JSON value from Redis cache."""
     if _redis_client is None:
@@ -88,7 +85,6 @@ async def cache_set(key: str, value: dict, ttl: int = 3600):
         pass
 
 
-# ── JWT helpers ──────────────────────────────────────────────────────────────
 def create_access_token(user_id: int, phone: str) -> tuple[str, int]:
     """Create a JWT access token. Returns (token, expires_in_seconds)."""
     expires_delta = timedelta(minutes=JWT_EXPIRE_MINUTES)
@@ -98,21 +94,20 @@ def create_access_token(user_id: int, phone: str) -> tuple[str, int]:
         "phone": phone,
         "exp": expire,
     }
-    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    token = jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
     return token, int(expires_delta.total_seconds())
 
 
 def decode_access_token(token: str) -> dict:
     """Decode and validate a JWT token."""
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
-# ── Current user dependency ──────────────────────────────────────────────────
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
     db: AsyncSession = Depends(get_db),

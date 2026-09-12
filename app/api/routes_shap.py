@@ -5,6 +5,7 @@ from sqlalchemy import select, desc
 from typing import List
 
 from app.api.deps import get_db
+from app.api.schemas import CropPath
 from app.database import ShapExplanation
 from pydantic import BaseModel
 
@@ -17,7 +18,7 @@ class ShapFeatureResponse(BaseModel):
     rank: int
 
 @router.get("/shap/{crop}", response_model=List[ShapFeatureResponse])
-async def get_shap_features(crop: str, db: AsyncSession = Depends(get_db)):
+async def get_shap_features(crop: CropPath, db: AsyncSession = Depends(get_db)):
     """
     Get top 10 SHAP feature explanations for a given crop.
     Returns the most recent available prediction date's SHAP values.

@@ -1,115 +1,87 @@
-"""
-tests/test_jwt_secret_validation.py
-────────────────────────────────────
-Unit tests asserting that the app refuses to start when JWT_SECRET is
-missing, empty, or too short.
-
-These tests instantiate Settings directly (bypassing the lru_cache singleton)
-with a fully controlled environment to verify the Pydantic validation.
-"""
-
+import importlib
 import os
-import pytest
+import sys
 from unittest.mock import patch
+
+import pytest
 from pydantic import ValidationError
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-# Minimal env vars that satisfy every *other* required field so we only
-# test JWT_SECRET validation in isolation.
 _BASE_ENV = {
     "DATABASE_URL": "sqlite+aiosqlite:///./test.db",
 }
 
-def _make_settings(**overrides):
-    """Create a fresh Settings instance with controlled env vars."""
+_APP_MODULES = [
+    "app.app",
+    "app.api.deps",
+    "app.database",
+    "app.logger",
+    "app.config",
+]
+
+
+def _clear_app_modules() -> None:
+    for module_name in _APP_MODULES:
+        sys.modules.pop(module_name, None)
+
+
+def _load_settings(**overrides):
     env = {**_BASE_ENV, **overrides}
-    # Prevent reading the real .env file by pointing to a non-existent file
     with patch.dict(os.environ, env, clear=True):
+        _clear_app_modules()
         from app.config import Settings
-        return Settings(_env_file=None)  # skip .env file
+
+        return Settings(_env_file=None)
 
 
-# ── Tests ────────────────────────────────────────────────────────────────────
+def _import_app_with_env(**overrides):
+    env = {**_BASE_ENV, **overrides}
+    with patch.dict(os.environ, env, clear=True):
+        _clear_app_modules()
+        return importlib.import_module("app.app")
 
-class TestJWTSecretMissing:
-    """App must crash at startup when JWT_SECRET is absent."""
 
-    def test_missing_jwt_secret_raises(self):
-        """Settings() must raise ValidationError when JWT_SECRET is not set."""
+class TestSecretKeyValidation:
+    def test_missing_secret_key_raises_validation_error(self):
         with pytest.raises(ValidationError) as exc_info:
-            _make_settings()  # no JWT_SECRET provided
-        errors = exc_info.value.errors()
-        jwt_errors = [e for e in errors if "JWT_SECRET" in str(e.get("loc", ""))]
-        assert len(jwt_errors) >= 1, "Expected a validation error for JWT_SECRET"
+            _load_settings()
 
-    def test_empty_jwt_secret_raises(self):
-        """An empty-string JWT_SECRET is treated as missing."""
+        messages = [error.get("msg", "") for error in exc_info.value.errors()]
+        assert any("SECRET_KEY environment variable is not set" in message for message in messages)
+
+    def test_empty_secret_key_raises_validation_error(self):
         with pytest.raises(ValidationError) as exc_info:
-            _make_settings(JWT_SECRET="")
-        errors = exc_info.value.errors()
-        jwt_errors = [e for e in errors if "JWT_SECRET" in str(e.get("loc", ""))]
-        assert len(jwt_errors) >= 1
+            _load_settings(SECRET_KEY="")
 
-    def test_whitespace_only_jwt_secret_raises(self):
-        """A whitespace-only JWT_SECRET is treated as missing."""
+        messages = [error.get("msg", "") for error in exc_info.value.errors()]
+        assert any("SECRET_KEY environment variable is empty" in message for message in messages)
+
+    def test_short_secret_key_raises_validation_error(self):
         with pytest.raises(ValidationError) as exc_info:
-            _make_settings(JWT_SECRET="   ")
-        errors = exc_info.value.errors()
-        jwt_errors = [e for e in errors if "JWT_SECRET" in str(e.get("loc", ""))]
-        assert len(jwt_errors) >= 1
+            _load_settings(SECRET_KEY="too-short")
+
+        messages = [error.get("msg", "") for error in exc_info.value.errors()]
+        assert any("SECRET_KEY must be at least 32 characters long" in message for message in messages)
+
+    def test_valid_secret_key_passes(self):
+        settings = _load_settings(SECRET_KEY="a" * 64)
+        assert len(settings.SECRET_KEY) == 64
 
 
-class TestJWTSecretTooShort:
-    """App must crash when JWT_SECRET is below the 32-char minimum."""
+class TestAppStartupValidation:
+    def test_app_import_fails_when_secret_key_missing(self):
+        with pytest.raises(RuntimeError, match="SECRET_KEY environment variable is not set"):
+            _import_app_with_env()
 
-    def test_short_jwt_secret_raises(self):
-        """A 10-character secret must be rejected."""
-        with pytest.raises(ValidationError) as exc_info:
-            _make_settings(JWT_SECRET="tooshort!!")  # 10 chars
-        errors = exc_info.value.errors()
-        jwt_errors = [e for e in errors if "JWT_SECRET" in str(e.get("loc", ""))]
-        assert len(jwt_errors) >= 1
+    def test_app_import_fails_when_secret_key_empty(self):
+        with pytest.raises(RuntimeError, match="SECRET_KEY environment variable is empty"):
+            _import_app_with_env(SECRET_KEY="   ")
 
-    def test_exactly_31_chars_raises(self):
-        """31 characters is just below the threshold — must fail."""
-        with pytest.raises(ValidationError):
-            _make_settings(JWT_SECRET="a" * 31)
-
-
-class TestJWTSecretValid:
-    """A properly-configured JWT_SECRET should pass validation."""
-
-    def test_valid_64_char_hex_secret(self):
-        """A 64-char hex string (output of `openssl rand -hex 32`) should work."""
-        settings = _make_settings(
-            JWT_SECRET="abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        )
-        assert len(settings.JWT_SECRET) == 64
-
-    def test_exactly_32_chars_passes(self):
-        """The minimum length (32 chars) should be accepted."""
-        settings = _make_settings(JWT_SECRET="a" * 32)
-        assert len(settings.JWT_SECRET) == 32
-
-
-class TestSecretNotLogged:
-    """The validator must never include the actual secret value in errors."""
-
-    def test_error_message_does_not_contain_secret(self):
-        """Ensure our custom validator message doesn't leak the secret value.
-
-        Note: Pydantic's ValidationError repr always includes input_value for
-        debugging.  We verify that *our* error message (the 'msg' field) never
-        contains the actual secret.
-        """
+    def test_startup_error_does_not_echo_secret_value(self):
         short_secret = "leaky_secret_value"
-        with pytest.raises(ValidationError) as exc_info:
-            _make_settings(JWT_SECRET=short_secret)
-        errors = exc_info.value.errors()
-        for error in errors:
-            # 'msg' contains our custom ValueError text
-            assert short_secret not in error.get("msg", ""), (
-                "The actual secret value must NEVER appear in validator error messages"
-            )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _import_app_with_env(SECRET_KEY=short_secret)
+
+        assert short_secret not in str(exc_info.value)
+        assert "at least 32 characters" in str(exc_info.value)

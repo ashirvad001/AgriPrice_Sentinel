@@ -1,42 +1,62 @@
 """
 app/services/forecast_service.py
-────────────────────────────────
+--------------------------------
 Business logic layer for generating crop price forecasts.
-Orchestrates data fetching, caching, ML inference, and statistical fallback.
+Orchestrates data fetching, caching, and ML inference.
 
-Fallback policy (Option B — degraded + transparent):
-  • Model available    → real MC Dropout inference, source="model"
-  • Model unavailable  → statistical baseline if data exists, source="statistical-baseline"
-  • No data at all     → HTTP 503 (never returns fake flat values)
+Strict forecast policy:
+  - Forecast responses must come from the trained model.
+  - Cached non-model payloads are ignored.
+  - If the model cannot be loaded or cannot produce a real forecast,
+    the API returns a 5xx error instead of synthetic data.
 """
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from datetime import date, timedelta
-from pathlib import Path
-from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
-import mlflow.keras
-
-from app.repositories.forecast_repository import ForecastRepository
-from app.api.schemas import ForecastResponse, ForecastDay
+from app.api.schemas import ForecastDay, ForecastResponse
 from app.config import get_settings
 from app.logger import get_logger
+from app.repositories.forecast_repository import ForecastRepository
 
 logger = get_logger(__name__)
 settings = get_settings()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 SAVED_MODELS_DIR = PROJECT_ROOT / "saved_models"
+FORECAST_CACHE_PREFIX = "forecast:v3"
+CANARY_CROP = "wheat"
+CANARY_MANDI = "Azadpur"
 
-# ── MSP lookup (₹ per quintal, 2025-26 Rabi & Kharif) ───────────────────────
 MSP_TABLE: dict[str, float] = {
-    "wheat": 2275.0, "rice": 2320.0, "maize": 2090.0, "bajra": 2625.0,
-    "jowar": 3371.0, "ragi": 3846.0, "barley": 1850.0, "gram": 5440.0,
-    "tur": 7000.0, "moong": 8558.0, "urad": 6950.0, "groundnut": 6377.0,
-    "soybean": 4600.0, "mustard": 5650.0, "cotton": 7020.0, "sugarcane": 315.0,
+    "wheat": 2275.0,
+    "rice": 2320.0,
+    "maize": 2090.0,
+    "bajra": 2625.0,
+    "jowar": 3371.0,
+    "ragi": 3846.0,
+    "barley": 1850.0,
+    "gram": 5440.0,
+    "tur": 7000.0,
+    "moong": 8558.0,
+    "urad": 6950.0,
+    "groundnut": 6377.0,
+    "soybean": 4600.0,
+    "mustard": 5650.0,
+    "cotton": 7020.0,
+    "sugarcane": 315.0,
 }
+
+
+class ForecastInferenceError(RuntimeError):
+    """Raised when the trained model cannot produce a usable forecast."""
 
 
 class ForecastService:
@@ -45,20 +65,51 @@ class ForecastService:
 
     @staticmethod
     def _model_stem(crop: str, mandi: str) -> str:
-        """Canonical file stem for a crop–mandi pair."""
+        """Canonical file stem for a crop-mandi pair."""
         return f"{crop.lower()}_{mandi.lower().replace(' ', '_')}"
+
+    @staticmethod
+    def _resolve_sequence_length(model) -> int:
+        seq_len = settings.SEQUENCE_LENGTH
+        try:
+            shape_len = model.input_shape[1]
+            if shape_len is not None:
+                seq_len = int(shape_len)
+        except Exception:
+            pass
+        return seq_len
+
+    @staticmethod
+    def _resolve_feature_count(model) -> int | None:
+        try:
+            feature_count = model.input_shape[-1]
+            if feature_count is not None:
+                return int(feature_count)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _resolve_output_steps(model) -> int | None:
+        try:
+            output_shape = model.output_shape
+            if isinstance(output_shape, list):
+                output_shape = output_shape[0]
+            output_steps = output_shape[-1]
+            if output_steps is not None:
+                return int(output_steps)
+        except Exception:
+            pass
+        return None
 
     @classmethod
     def load_crop_model(cls, crop: str, mandi: str):
-        """Tries MLflow model registry first, then falls back to local file.
-
-        Returns the loaded Keras model or None.  All failures are logged at
-        WARNING level so operators can see *why* inference fell back.
-        """
-        import mlflow
-        mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
-
+        """Try MLflow first, then a local saved Keras model."""
         try:
+            import mlflow
+            import mlflow.keras
+
+            mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
             model_uri = f"models:/CropPrice_{crop}_{mandi.replace(' ', '_')}/Production"
             model = mlflow.keras.load_model(model_uri)
             logger.info(f"Loaded model from MLflow registry for {crop}/{mandi}")
@@ -70,21 +121,22 @@ class ForecastService:
 
         try:
             import tensorflow as tf
+
             local_path = SAVED_MODELS_DIR / f"{cls._model_stem(crop, mandi)}_model.keras"
             if local_path.exists():
                 model = tf.keras.models.load_model(str(local_path), compile=False)
                 logger.info(f"Loaded model from local file: {local_path}")
                 return model
-            else:
-                logger.warning(f"Local model file not found: {local_path}")
+            logger.warning(f"Local model file not found: {local_path}")
         except Exception as exc:
-            logger.warning(f"Local model load failed: {type(exc).__name__}: {exc}")
+            logger.warning(f"Local model load failed for {crop}/{mandi}: {type(exc).__name__}: {exc}")
 
         return None
 
     @classmethod
     def load_scaler(cls, crop: str, mandi: str):
         import joblib
+
         path = SAVED_MODELS_DIR / f"{cls._model_stem(crop, mandi)}_scaler.pkl"
         if path.exists():
             try:
@@ -93,176 +145,179 @@ class ForecastService:
                 logger.warning(f"Scaler load failed ({path}): {exc}")
         return None
 
+    @classmethod
+    def probe_model_readiness(cls, crop: str = CANARY_CROP, mandi: str = CANARY_MANDI) -> tuple[bool, str]:
+        """Verify a canary model can be loaded and run a sample prediction."""
+        model = cls.load_crop_model(crop, mandi)
+        if model is None:
+            return False, f"Cannot load canary model for {crop}/{mandi}"
+
+        seq_len = cls._resolve_sequence_length(model)
+        num_features = cls._resolve_feature_count(model) or settings.NUM_FEATURES
+        dummy_input = np.zeros((1, seq_len, num_features), dtype=np.float32)
+
+        try:
+            prediction = model(dummy_input, training=False)
+            prediction_array = prediction.numpy() if hasattr(prediction, "numpy") else np.asarray(prediction)
+        except Exception as exc:
+            return False, f"Canary model prediction failed: {type(exc).__name__}"
+
+        if prediction_array.size == 0:
+            return False, "Canary model returned an empty prediction"
+
+        if not np.all(np.isfinite(prediction_array)):
+            return False, "Canary model returned non-finite values"
+
+        return True, f"{crop}/{mandi}"
+
     def _run_model_inference(
-        self, model, scaler, records: list[dict], horizon: int
-    ) -> tuple[list[float], list[float], list[float]] | None:
-        """Run MC Dropout inference on the historical data sequence."""
-        from app.forecast_model import get_mc_dropout_predictions
+        self,
+        model,
+        scaler,
+        records: list[dict],
+        horizon: int,
+    ) -> tuple[list[float], list[float], list[float]]:
+        """Run real MC Dropout inference on historical data."""
         from app.feature_engineering import engineer_features
+        from app.forecast_model import get_mc_dropout_predictions
+
+        if not records:
+            raise ForecastInferenceError("no historical price data is available for inference")
+
+        model_output_steps = self._resolve_output_steps(model)
+        if model_output_steps is not None and horizon > model_output_steps:
+            raise ForecastInferenceError(
+                f"requested {horizon} forecast days but the trained model only outputs {model_output_steps}"
+            )
 
         df = pd.DataFrame(records)
-        for col in ["msp", "arrivals_tonnes", "rainfall_mm", "max_temp",
-                     "min_temp", "freight_index", "futures_price"]:
-            if col not in df.columns:
-                df[col] = 0.0
+        for column in [
+            "msp",
+            "arrivals_tonnes",
+            "rainfall_mm",
+            "max_temp",
+            "min_temp",
+            "freight_index",
+            "futures_price",
+        ]:
+            if column not in df.columns:
+                df[column] = 0.0
         df = df.fillna(0.0)
 
         features_df = engineer_features(df)
-        if features_df.empty or len(features_df) < 30:
-            logger.warning("Not enough rows after feature engineering.")
-            return None
+        if features_df.empty:
+            raise ForecastInferenceError("feature engineering produced no rows")
 
-        seq_len = settings.SEQUENCE_LENGTH
-        try:
-            shape_len = model.input_shape[1]
-            if shape_len is not None:
-                seq_len = shape_len
-        except Exception:
-            pass
-
+        seq_len = self._resolve_sequence_length(model)
         if len(features_df) < seq_len:
-            logger.warning(f"Only {len(features_df)} rows available but model needs {seq_len}.")
-            return None
+            raise ForecastInferenceError(
+                f"only {len(features_df)} engineered rows are available but the model requires {seq_len}"
+            )
 
         X_raw = features_df.iloc[-seq_len:].values.astype(np.float32)
+        expected_features = self._resolve_feature_count(model)
+        if expected_features is not None and X_raw.shape[1] != expected_features:
+            raise ForecastInferenceError(
+                f"engineered feature width {X_raw.shape[1]} does not match model expectation {expected_features}"
+            )
+
         if scaler is not None:
-            X_raw = scaler.transform(X_raw)
+            try:
+                X_raw = scaler.transform(X_raw)
+            except Exception as exc:
+                raise ForecastInferenceError(f"scaler transform failed: {type(exc).__name__}") from exc
 
         X = X_raw.reshape(1, seq_len, -1)
-        mean_pred, lower_bound, upper_bound = get_mc_dropout_predictions(
-            model, X, n_iter=settings.MC_DROPOUT_ITERATIONS,
-        )
 
-        means = mean_pred[0].tolist()
-        lowers = lower_bound[0].tolist()
-        uppers = upper_bound[0].tolist()
-
-        if len(means) >= horizon:
-            return means[:horizon], lowers[:horizon], uppers[:horizon]
-
-        while len(means) < horizon:
-            last_mean = means[-1]
-            last_spread = (uppers[-1] - lowers[-1]) / 2
-            new_spread = last_spread * 1.05
-            means.append(last_mean)
-            lowers.append(last_mean - new_spread)
-            uppers.append(last_mean + new_spread)
-
-        return means[:horizon], lowers[:horizon], uppers[:horizon]
-
-    def _statistical_baseline(
-        self, records: list[dict], horizon: int
-    ) -> tuple[list[float], list[float], list[float]]:
-        """Linear trend + seasonal decomposition baseline."""
-        from statsmodels.tsa.seasonal import seasonal_decompose
-
-        prices = [float(r["modal_price"]) for r in records if r.get("modal_price") is not None]
-        prices = prices[-90:] if len(prices) > 90 else prices
-
-        if len(prices) < 14:
-            last = prices[-1] if prices else 2000.0
-            return [last] * horizon, [last * 0.95] * horizon, [last * 1.05] * horizon
-
-        series = pd.Series(prices, dtype=float)
-        x = np.arange(len(series))
-        slope, intercept = np.polyfit(x, series.values, 1)
-
-        period = min(7, len(series) // 3)
-        if period < 2:
-            period = 2
         try:
-            decomp = seasonal_decompose(series, model="additive", period=period, extrapolate_trend="freq")
-            seasonal_component = decomp.seasonal.values
-        except Exception:
-            seasonal_component = np.zeros(period)
+            mean_pred, lower_bound, upper_bound = get_mc_dropout_predictions(
+                model,
+                X,
+                n_iter=settings.MC_DROPOUT_ITERATIONS,
+            )
+        except Exception as exc:
+            raise ForecastInferenceError(f"MC Dropout prediction failed: {type(exc).__name__}") from exc
 
-        residual_std = float(series.diff().dropna().std())
-        if np.isnan(residual_std) or residual_std == 0:
-            residual_std = float(series.mean()) * 0.03
+        means = np.asarray(mean_pred[0], dtype=np.float32)
+        lowers = np.asarray(lower_bound[0], dtype=np.float32)
+        uppers = np.asarray(upper_bound[0], dtype=np.float32)
 
-        means, lowers, uppers = [], [], []
-        for i in range(1, horizon + 1):
-            trend_val = slope * (len(series) + i) + intercept
-            season_val = float(seasonal_component[(len(series) + i) % len(seasonal_component)])
-            pred = trend_val + season_val
+        if means.size == 0:
+            raise ForecastInferenceError("model returned an empty forecast")
+        if means.size < horizon:
+            raise ForecastInferenceError(
+                f"model returned {means.size} forecast steps but {horizon} were requested"
+            )
+        if not (np.all(np.isfinite(means[:horizon])) and np.all(np.isfinite(lowers[:horizon])) and np.all(np.isfinite(uppers[:horizon]))):
+            raise ForecastInferenceError("model returned non-finite forecast values")
 
-            ci = 1.96 * residual_std * np.sqrt(i)
-            means.append(round(float(pred), 2))
-            lowers.append(round(float(pred - ci), 2))
-            uppers.append(round(float(pred + ci), 2))
+        return means[:horizon].tolist(), lowers[:horizon].tolist(), uppers[:horizon].tolist()
 
-        return means, lowers, uppers
+    async def get_forecast(
+        self,
+        crop: str,
+        mandi: str,
+        horizon: int,
+        force_refresh: bool = False,
+    ) -> tuple[ForecastResponse, str]:
+        """Generate a forecast using the trained model or fail with a 5xx error."""
+        cache_key = f"{FORECAST_CACHE_PREFIX}:{crop.lower()}:{mandi.lower()}:{horizon}"
 
-    async def get_forecast(self, crop: str, mandi: str, horizon: int, force_refresh: bool = False) -> tuple[ForecastResponse, str]:
-        """
-        Orchestrates forecast fetching. 
-        Returns (ForecastResponse, forecast_source).
-        """
-        cache_key = f"forecast:v2:{crop.lower()}:{mandi.lower()}:{horizon}"
-        
         if not force_refresh:
             cached = await self.repo.get_cached_forecast(cache_key)
             if cached:
-                return ForecastResponse(**cached), "cache"
+                cached_response = ForecastResponse(**cached)
+                if cached_response.forecast_source == "model":
+                    return cached_response, "model"
+                logger.warning(
+                    f"Ignoring cached non-model forecast for {crop}/{mandi} "
+                    f"(source={cached_response.forecast_source})"
+                )
 
         records = await self.repo.fetch_historical_prices(crop, mandi, days=365)
-        
+
         msp_value = MSP_TABLE.get(crop.lower())
         base_price: float | None = None
-        for r in reversed(records):
-            if r.get("modal_price") is not None:
-                base_price = float(r["modal_price"])
+        for record in reversed(records):
+            if record.get("modal_price") is not None:
+                base_price = float(record["modal_price"])
                 break
         if base_price is None:
-            base_price = msp_value if msp_value else 2000.0
-
-        forecast_source = "model"
-        means: list[float] | None = None
+            base_price = msp_value if msp_value is not None else 2000.0
 
         model = self.load_crop_model(crop, mandi)
-        if model is not None:
-            scaler = self.load_scaler(crop, mandi)
-            result = self._run_model_inference(model, scaler, records, horizon)
-            if result is not None:
-                means, lowers, uppers = result
-                logger.info(f"Forecast via trained model for {crop}/{mandi}")
-            else:
-                logger.warning(
-                    f"Model loaded but inference failed for {crop}/{mandi} — "
-                    "falling back to statistical baseline"
-                )
+        if model is None:
+            detail = (
+                f"Forecast model unavailable for {crop}/{mandi}: "
+                "trained model could not be loaded."
+            )
+            logger.error(detail)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
 
-        if means is None:
-            forecast_source = "statistical-baseline"
-            if records:
-                means, lowers, uppers = self._statistical_baseline(records, horizon)
-                logger.warning(
-                    f"No ML model available for {crop}/{mandi}. "
-                    f"Returning statistical baseline forecast (source='{forecast_source}')."
-                )
-            else:
-                # ── NO fake data: fail loudly ────────────────────────────
-                logger.error(
-                    f"Cannot produce forecast for {crop}/{mandi}: "
-                    "no trained model AND no historical price data available."
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=(
-                        f"Forecast unavailable for {crop}/{mandi}: "
-                        "no trained model and no historical data. "
-                        "Please ensure a model is trained or price data is ingested."
-                    ),
-                )
+        scaler = self.load_scaler(crop, mandi)
+        try:
+            means, lowers, uppers = self._run_model_inference(model, scaler, records, horizon)
+        except ForecastInferenceError as exc:
+            detail = f"Forecast inference unavailable for {crop}/{mandi}: {exc}."
+            logger.error(detail)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from None
+        except Exception:
+            logger.exception(f"Unexpected forecast inference failure for {crop}/{mandi}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Forecast inference failed for {crop}/{mandi}. See server logs for details.",
+            ) from None
+
+        logger.info(f"Forecast via trained model for {crop}/{mandi}")
 
         forecast_days = [
             ForecastDay(
-                date=date.today() + timedelta(days=i + 1),
-                predicted_price=round(float(means[i]), 2),
-                lower_bound=round(float(lowers[i]), 2),
-                upper_bound=round(float(uppers[i]), 2),
+                date=date.today() + timedelta(days=index + 1),
+                predicted_price=round(float(means[index]), 2),
+                lower_bound=round(float(lowers[index]), 2),
+                upper_bound=round(float(uppers[index]), 2),
             )
-            for i in range(horizon)
+            for index in range(horizon)
         ]
 
         avg_price = round(float(np.mean(means)), 2)
@@ -270,14 +325,17 @@ class ForecastService:
         if msp_value and avg_price > msp_value:
             pct = round(float((avg_price - msp_value) / msp_value * 100), 1)
             recommendation = "SELL"
-            reason = f"Predicted avg price ₹{avg_price:,.0f} is {pct}% above MSP ₹{msp_value:,.0f}"
+            reason = f"Predicted avg price Rs.{avg_price:,.0f} is {pct}% above MSP Rs.{msp_value:,.0f}"
         elif msp_value:
             pct = round(float((msp_value - avg_price) / msp_value * 100), 1)
             recommendation = "HOLD"
-            reason = f"Predicted avg price ₹{avg_price:,.0f} is {pct}% below MSP ₹{msp_value:,.0f} — consider holding"
+            reason = (
+                f"Predicted avg price Rs.{avg_price:,.0f} is {pct}% below MSP Rs.{msp_value:,.0f}; "
+                "consider holding"
+            )
         else:
             recommendation = "HOLD"
-            reason = f"No MSP data available for {crop}. Average predicted price: ₹{avg_price:,.0f}"
+            reason = f"No MSP data available for {crop}. Average predicted price: Rs.{avg_price:,.0f}"
 
         response = ForecastResponse(
             crop=crop,
@@ -288,10 +346,10 @@ class ForecastService:
             avg_predicted_price=avg_price,
             recommendation=recommendation,
             recommendation_reason=reason,
-            forecast_source=forecast_source,
+            forecast_source="model",
             forecast=forecast_days,
         )
 
         await self.repo.set_cached_forecast(cache_key, response.model_dump(), ttl=3600)
 
-        return response, forecast_source
+        return response, "model"
