@@ -34,6 +34,7 @@ import mlflow.keras
 from app.celery_app import app as celery_app
 from app.feature_engineering import engineer_features
 from app.forecast_model import build_hypermodel
+from app.data_loader import load_crop_from_csv
 
 # ── Sync SQLAlchemy for Celery workers (Celery is synchronous) ───────────────
 from sqlalchemy import create_engine, select, text
@@ -106,65 +107,63 @@ OUTPUT_STEPS = 30
 
 def _load_crop_data(session: Session, crop: str, mandi: str, years: int = 3) -> pd.DataFrame:
     """
-    Load raw price data from PostgreSQL for the past `years` years.
-    Reconstructs a DataFrame from the raw_data JSON column.
+    Load raw price data for a crop/mandi combination.
+
+    Data source priority:
+        1. PostgreSQL ``raw_prices`` table (live scraped data)
+        2. Historical CSV dataset via ``app.data_loader`` (real mandi data)
+
+    Raises ``ValueError`` if neither source has sufficient data.
     """
-    cutoff = date.today() - timedelta(days=years * 365)
-    query = text("""
-        SELECT fetch_date, raw_data
-        FROM raw_prices
-        WHERE LOWER(crop) = LOWER(:crop)
-          AND raw_data->>'market_name' ILIKE :mandi
-          AND fetch_date >= :cutoff
-        ORDER BY fetch_date ASC
-    """)
-    rows = session.execute(query, {"crop": crop, "mandi": mandi, "cutoff": cutoff}).fetchall()
+    # ── Try database first ───────────────────────────────────────────────
+    if session is not None:
+        cutoff = date.today() - timedelta(days=years * 365)
+        query = text("""
+            SELECT fetch_date, raw_data
+            FROM raw_prices
+            WHERE LOWER(crop) = LOWER(:crop)
+              AND raw_data->>'market_name' ILIKE :mandi
+              AND fetch_date >= :cutoff
+            ORDER BY fetch_date ASC
+        """)
+        rows = session.execute(query, {"crop": crop, "mandi": mandi, "cutoff": cutoff}).fetchall()
 
-    if not rows:
-        logger.warning(f"No data found for {crop} at {mandi} — generating synthetic data for demo")
-        return _generate_synthetic_data(crop)
+        if rows:
+            records = []
+            for fetch_date, raw_data in rows:
+                if isinstance(raw_data, str):
+                    raw_data = json.loads(raw_data)
+                record = {
+                    "date": fetch_date,
+                    "modal_price": raw_data.get("modal_price", np.nan),
+                    "msp": raw_data.get("msp", 2000.0),
+                    "min_price": raw_data.get("min_price", np.nan),
+                    "max_price": raw_data.get("max_price", np.nan),
+                    "arrivals_tonnes": raw_data.get("arrivals_tonnes", np.nan),
+                    "rainfall_mm": raw_data.get("rainfall_mm", 0.0),
+                    "max_temp": raw_data.get("max_temp", 35.0),
+                    "min_temp": raw_data.get("min_temp", 20.0),
+                    "freight_index": raw_data.get("freight_index", 100.0),
+                    "futures_price": raw_data.get("futures_price", np.nan),
+                }
+                records.append(record)
 
-    records = []
-    for fetch_date, raw_data in rows:
-        if isinstance(raw_data, str):
-            raw_data = json.loads(raw_data)
-        record = {
-            "date": fetch_date,
-            "modal_price": raw_data.get("modal_price", np.nan),
-            "msp": raw_data.get("msp", 2000.0),
-            "min_price": raw_data.get("min_price", np.nan),
-            "max_price": raw_data.get("max_price", np.nan),
-            "arrivals_tonnes": raw_data.get("arrivals_tonnes", np.nan),
-            "rainfall_mm": raw_data.get("rainfall_mm", 0.0),
-            "max_temp": raw_data.get("max_temp", 35.0),
-            "min_temp": raw_data.get("min_temp", 20.0),
-            "freight_index": raw_data.get("freight_index", 100.0),
-            "futures_price": raw_data.get("futures_price", np.nan),
-        }
-        records.append(record)
+            df = pd.DataFrame(records)
+            logger.info(f"Loaded {len(df)} records for {crop} at {mandi} from DB (from {cutoff})")
+            return df
 
-    df = pd.DataFrame(records)
-    logger.info(f"Loaded {len(df)} records for {crop} at {mandi} (from {cutoff})")
-    return df
+    # ── Fallback: load from CSV dataset ──────────────────────────────────
+    logger.info(f"No DB data for {crop} at {mandi} — trying CSV dataset")
+    csv_df = load_crop_from_csv(crop, mandi=mandi, min_records=90)
+    if csv_df is not None and len(csv_df) >= 90:
+        logger.info(f"Loaded {len(csv_df)} records for {crop} at {mandi} from CSV")
+        return csv_df
 
-
-def _generate_synthetic_data(crop: str, n: int = 1100) -> pd.DataFrame:
-    """Generate synthetic data for demo/testing when no real data exists."""
-    np.random.seed(hash(crop) % 2**31)
-    dates = pd.date_range(end=date.today(), periods=n, freq="D")
-    return pd.DataFrame({
-        "date": dates,
-        "modal_price": np.random.uniform(1500, 3500, n).cumsum() / np.arange(1, n + 1) + 2000,
-        "msp": np.full(n, 2275.0),
-        "min_price": np.random.uniform(1400, 2500, n),
-        "max_price": np.random.uniform(2500, 3500, n),
-        "arrivals_tonnes": np.random.uniform(50, 500, n),
-        "rainfall_mm": np.random.uniform(0, 15, n),
-        "max_temp": np.random.uniform(28, 45, n),
-        "min_temp": np.random.uniform(12, 28, n),
-        "freight_index": np.random.uniform(90, 120, n),
-        "futures_price": np.random.uniform(1400, 2800, n),
-    })
+    raise ValueError(
+        f"Insufficient data for {crop} at {mandi}: "
+        f"no DB records found and CSV dataset has < 90 daily records. "
+        f"Place a real mandi price CSV at the MANDI_DATASET_PATH location."
+    )
 
 
 def _load_best_hyperparams(session: Session, crop: str) -> dict:

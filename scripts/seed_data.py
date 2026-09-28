@@ -18,6 +18,7 @@ import math
 from datetime import datetime, timedelta, timezone, date
 
 from app.database import AsyncSessionLocal, RawPrice, init_db
+from app.data_loader import load_mandi_dataset, get_dataset_path
 from sqlalchemy import select, and_
 
 
@@ -100,8 +101,83 @@ def generate_price_series(
     return prices
 
 
+async def _seed_from_csv(session) -> tuple[int, int]:
+    """Seed the database from a real mandi price CSV.
+
+    Returns (inserted, skipped) counts.
+    """
+    try:
+        df = load_mandi_dataset()
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[WARN] CSV not available: {exc}")
+        return 0, 0
+
+    if len(df) == 0:
+        return 0, 0
+
+    print(f"[CSV] Loading {len(df)} records from {get_dataset_path()}")
+    inserted, skipped = 0, 0
+
+    for _, row in df.iterrows():
+        crop = row.get("commodity", "")
+        state = row.get("state", "")
+        fetch_date = row["date"].date() if hasattr(row["date"], "date") else row["date"]
+
+        if not crop or not state:
+            skipped += 1
+            continue
+
+        existing = await session.execute(
+            select(RawPrice).where(
+                and_(
+                    RawPrice.crop == crop,
+                    RawPrice.state == state,
+                    RawPrice.fetch_date == fetch_date,
+                )
+            )
+        )
+        if existing.scalar_one_or_none():
+            skipped += 1
+            continue
+
+        raw_data = {
+            "commodity": crop,
+            "market": row.get("mandi", ""),
+            "market_name": row.get("mandi", ""),
+            "mandi": row.get("mandi", ""),
+            "state": state,
+            "district": row.get("district", ""),
+            "variety": row.get("variety", ""),
+            "modal_price": float(row["modal_price"]) if not pd.isna(row.get("modal_price")) else None,
+            "min_price": float(row["min_price"]) if not pd.isna(row.get("min_price")) else None,
+            "max_price": float(row["max_price"]) if not pd.isna(row.get("max_price")) else None,
+            "arrivals_tonnes": float(row["arrival_quantity"]) if "arrival_quantity" in row and not pd.isna(row.get("arrival_quantity")) else None,
+        }
+
+        session.add(RawPrice(
+            crop=crop,
+            state=state,
+            fetch_date=fetch_date,
+            raw_data=raw_data,
+            created_at=datetime.now(timezone.utc),
+        ))
+        inserted += 1
+
+        # Commit in batches to avoid memory pressure
+        if inserted % 1000 == 0:
+            await session.commit()
+            print(f"    ... {inserted} inserted so far")
+
+    await session.commit()
+    return inserted, skipped
+
+
 async def seed_database():
-    """Seed the database with historical price data."""
+    """Seed the database with historical price data.
+
+    Tries to load from a real mandi price CSV first.  Falls back to
+    synthetic data generation for crop/mandi combos not covered by the CSV.
+    """
     print("[SEED] Seeding historical price data...")
 
     # Ensure tables exist
@@ -109,11 +185,32 @@ async def seed_database():
     print("[OK] Database tables verified")
 
     async with AsyncSessionLocal() as session:
+        # ── Phase 1: seed from real CSV ──────────────────────────────────
+        csv_inserted, csv_skipped = await _seed_from_csv(session)
+        if csv_inserted > 0:
+            print(f"[CSV] {csv_inserted} records inserted, {csv_skipped} skipped from CSV")
+
+        # ── Phase 2: fill gaps with synthetic data ───────────────────────
         total_inserted = 0
         total_skipped = 0
 
         for idx, (crop, state, mandi, base, vol, trend, amp) in enumerate(SEED_CONFIGS):
-            print(f"  [+] Seeding {crop} / {mandi}...", end=" ")
+            # Check if CSV already seeded enough data for this combo
+            existing_count_result = await session.execute(
+                select(RawPrice).where(
+                    and_(
+                        RawPrice.crop == crop,
+                        RawPrice.state == state,
+                    )
+                )
+            )
+            existing_rows = existing_count_result.scalars().all()
+            if len(existing_rows) >= DAYS_TO_SEED:
+                print(f"  [=] {crop} / {mandi}: already has {len(existing_rows)} records, skipping synthetic")
+                total_skipped += len(existing_rows)
+                continue
+
+            print(f"  [+] Seeding {crop} / {mandi} (synthetic)...", end=" ")
 
             prices = generate_price_series(
                 base_price=base,
@@ -175,7 +272,9 @@ async def seed_database():
             print(f"OK {inserted} inserted, {skipped} skipped")
 
         print()
-        print(f"[DONE] Seeding complete! {total_inserted} records inserted, {total_skipped} skipped.")
+        print(f"[DONE] Seeding complete!")
+        print(f"    CSV: {csv_inserted} inserted, {csv_skipped} skipped")
+        print(f"    Synthetic: {total_inserted} inserted, {total_skipped} skipped")
         print(f"    Crops seeded: {len(SEED_CONFIGS)}")
         print(f"    Date range: {date.today() - timedelta(days=DAYS_TO_SEED)} -> {date.today()}")
 

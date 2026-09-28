@@ -89,6 +89,12 @@ class Settings(BaseSettings):
         description="MLflow tracking server URI",
     )
 
+    # Mandi Dataset
+    MANDI_DATASET_PATH: str = Field(
+        default="data/raw/mandi_prices.csv",
+        description="Path to mandi price CSV (absolute or relative to project root)",
+    )
+
     # CORS
     CORS_ORIGINS: str = Field(
         default="http://localhost:3000,http://localhost:3001",
